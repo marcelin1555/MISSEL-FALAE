@@ -11,7 +11,7 @@ PROGRAMAS[#PROGRAMAS + 1] = { chave = "missil", arquivo = "missil.lua", titulo =
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "3.0"
+local VERSAO = "3.1"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -118,11 +118,11 @@ local function confirmar(titulo, pergunta)
   end
 end
 
-local function perguntar(y, rotulo, padrao)
+local function perguntar(y, rotulo, padrao, oculto)
   escrever(2, y, rotulo, colors.lightGray)
   term.setCursorPos(2 + #rotulo, y)
   cor(colors.white)
-  return read(nil, nil, nil, padrao ~= nil and tostring(padrao) or nil)
+  return read(oculto and "*" or nil, nil, nil, padrao ~= nil and tostring(padrao) or nil)
 end
 
 -- menu com setas; retorna o indice escolhido ou nil (BACKSPACE)
@@ -216,6 +216,11 @@ end
 
 local LADOS = { "top", "bottom", "front", "back", "left", "right", "todos" }
 
+-- lado de cada vector thruster no missil -> vetor unitario {norte, leste}
+local LADO_VETOR = { N = { 1, 0 }, S = { -1, 0 }, L = { 0, 1 }, O = { 0, -1 }, C = { 0, 0 } }
+local GIRO_MAX = 0.5 -- parte maxima do bocal usada para frear o giro
+local TESTE_PULSO = 0.3 -- toque de giro usado no teste do sentido do freio
+
 local PADRAO = {
   nome = "sem_nome",
   -- gimbal
@@ -225,8 +230,10 @@ local PADRAO = {
   -- bocal
   eixoX = 2, sinalX = 1, eixoY = 1, sinalY = 1,
   bocalOk = false,
+  posMotores = {}, -- lado de cada vector thruster (N/S/L/O/C)
   -- voo
   kp = 0.04, kd = 0.015, inverter = false,
+  controleGiro = true, kGiro = 0.15, inverterGiro = false,
   empuxoVetor = 1.0, acelerador = 1.0, usarSolidos = true,
   abortar = 60, contagem = 3,
   -- navegacao
@@ -241,6 +248,13 @@ local PADRAO = {
   -- sistema
   codigo = "", iniciarRemoto = false,
   alvoX = 0, alvoY = 64, alvoZ = 0,
+}
+
+-- ajustes que aparecem com %d: precisam ser inteiros
+local INTEIROS = {
+  abortar = true, contagem = true, altCruzeiro = true, altSaida = true,
+  distAtaque = true, alcanceMax = true, raioDetonacao = true,
+  tempoArme = true, distArme = true, tempoMax = true,
 }
 
 local cfg = {}
@@ -270,7 +284,10 @@ end
 
 local function aplicar(dados)
   for k, v in pairs(dados) do
-    if PADRAO[k] ~= nil and type(v) == type(PADRAO[k]) then cfg[k] = v end
+    if PADRAO[k] ~= nil and type(v) == type(PADRAO[k]) then
+      if INTEIROS[k] then v = math.floor(v + 0.5) end
+      cfg[k] = v
+    end
   end
 end
 
@@ -361,8 +378,31 @@ local function acelerar(m, pot)
   pcall(m.p.setPowerNormalized, pot)
 end
 
-local function vetorComando(x, y)
-  for _, v in ipairs(P.vetores) do pcall(v.p.setVector, x, y) end
+-- x, y: inclinacao igual para todos os bocais
+-- giro: forca tangencial para frear a rotacao (cada motor inclina de lado)
+local function vetorComando(x, y, giro)
+  local inv = cfg.inverter and -1 or 1
+  for _, v in ipairs(P.vetores) do
+    local vx, vy = x, y
+    local r = giro and giro ~= 0 and LADO_VETOR[cfg.posMotores[v.nome] or "C"]
+    if r then
+      -- forca lateral {norte, leste} neste motor que gira o missil contra a rotacao
+      local f = { giro * r[2], -giro * r[1] }
+      vx = lim1(vx - inv * cfg.sinalX * f[cfg.eixoX])
+      vy = lim1(vy - inv * cfg.sinalY * f[cfg.eixoY])
+    end
+    pcall(v.p.setVector, vx, vy)
+  end
+end
+
+-- quantos vector thrusters tem lado definido (fora do centro)
+local function motoresMapeados()
+  local n = 0
+  for _, v in ipairs(P.vetores) do
+    local lado = cfg.posMotores[v.nome]
+    if lado and lado ~= "C" then n = n + 1 end
+  end
+  return n
 end
 
 local function vetorEmpuxo(pot)
@@ -427,12 +467,42 @@ local function abrirRede()
   return true
 end
 
+-- CC: Sable (Create Aeronautics): a fisica do jogo informa posicao e giro
+-- direto, sem GPS. So funciona com o computador montado na contraption.
+local function sublevelPose()
+  if type(sublevel) ~= "table" or type(sublevel.getLogicalPose) ~= "function" then return nil end
+  local ok, pose = pcall(sublevel.getLogicalPose)
+  if not ok or type(pose) ~= "table" or type(pose.position) ~= "table" then return nil end
+  local p = pose.position
+  if type(p.x) ~= "number" or type(p.y) ~= "number" or type(p.z) ~= "number" then return nil end
+  return { x = p.x, y = p.y, z = p.z }
+end
+
+-- rotacao em torno do eixo vertical (rad/s; positivo = anti-horario visto de cima)
+local function giroVertical()
+  if type(sublevel) ~= "table" or type(sublevel.getAngularVelocity) ~= "function" then return nil end
+  local ok, w = pcall(sublevel.getAngularVelocity)
+  if ok and type(w) == "table" and type(w.y) == "number" then return w.y end
+  return nil
+end
+
+local fontePos = "nenhuma"
+
+-- posicao do missil: sublevel se estiver montado, senao GPS
 local function posicao(timeout)
-  if not P.modem then return nil end
-  local x, y, z = gps.locate(timeout or 0.5)
-  if not x then return nil end
-  ultimaPos = { x = x, y = y, z = z }
-  return ultimaPos
+  local p = sublevelPose()
+  if p then
+    fontePos = "sublevel"
+  elseif P.modem then
+    local x, y, z = gps.locate(timeout or 0.5)
+    if not x then return nil end
+    p = { x = x, y = y, z = z }
+    fontePos = "GPS"
+  else
+    return nil
+  end
+  ultimaPos = p
+  return p
 end
 
 local function statusMissil()
@@ -667,6 +737,63 @@ local function calibrarBocal()
   }, colors.lime)
 end
 
+---------------------------------------------------------------- CALIBRAR GIRO
+
+local function calibrarMotores()
+  if not exigir(true) then return end
+  if not cfg.bocalOk then
+    aviso("GIRO", { "Calibre o bocal antes." }, colors.orange)
+    return
+  end
+  vetorEmpuxo(0)
+  vetorComando(0, 0)
+
+  local novo = {}
+  for i, v in ipairs(P.vetores) do
+    cabecalho(("GIRO %d/%d"):format(i, #P.vetores))
+    escrever(2, 3, "Um bocal esta balancando sozinho.", colors.yellow)
+    escrever(2, 4, "Em que lado do missil fica ESSE motor?", colors.yellow)
+    escrever(2, 6, "N Norte   S Sul   L Leste   O Oeste")
+    escrever(2, 7, "C = no centro (eixo do missil)")
+    escrever(2, 9, "Missil na mesma posicao da calibracao!", colors.lightGray)
+    escrever(2, 10, "Motor: " .. v.nome, colors.lightGray)
+    rodape("N/S/L/O/C escolhe   BACKSPACE cancela")
+
+    local escolha
+    parallel.waitForAny(function()
+      local lado = 1
+      while true do
+        pcall(v.p.setVector, lado, 0)
+        lado = -lado
+        sleep(0.5)
+      end
+    end, function()
+      while true do
+        local ev, p = os.pullEvent()
+        if ev == "char" and LADO_VETOR[p:upper()] then
+          escolha = p:upper()
+          return
+        elseif ev == "key" and p == keys.backspace then
+          return
+        end
+      end
+    end)
+    pcall(v.p.setVector, 0, 0)
+    if not escolha then return end
+    novo[v.nome] = escolha
+  end
+
+  cfg.posMotores = novo
+  salvarConfig()
+  local linhas = {}
+  for _, v in ipairs(P.vetores) do
+    table.insert(linhas, ("%-26s %s"):format(v.nome, novo[v.nome]))
+  end
+  table.insert(linhas, "")
+  table.insert(linhas, "O freio de giro usa a API sublevel (CC: Sable).")
+  aviso("GIRO SALVO", linhas, colors.lime)
+end
+
 ---------------------------------------------------------------- VOO
 
 local function desenharHorizonte(n, l, an, al)
@@ -709,7 +836,7 @@ local function voar(opts)
     fase = guiado and "DECOLAGEM" or "ESTABILIZAR",
     motivo = "Fim", detonou = false, armado = false,
     n = 0, l = 0, giro = 0, cx = 0, cy = 0, hz = 0,
-    alvoN = 0, alvoL = 0, psi = 0, incMax = 0,
+    alvoN = 0, alvoL = 0, psi = 0, incMax = 0, wy = 0, mapeados = 0,
     acel = cfg.acelerador, integral = cfg.acelBase,
     vel = { n = 0, l = 0, y = 0 }, eventos = {},
   }
@@ -732,14 +859,19 @@ local function voar(opts)
   detectar()
   if not P.gimbal then falha("Gimbal Sensor nao encontrado") return end
   if #P.vetores == 0 then falha("Vector thruster nao encontrado") return end
+  S.mapeados = motoresMapeados()
+  -- teste automatico do sentido do freio de giro (so no teste de estabilizacao)
+  if not guiado and cfg.controleGiro and S.mapeados >= 2 and giroVertical() then
+    S.tg = {}
+  end
 
   if guiado then
-    if not P.modem then
-      falha("Sem modem sem fio encostado direto no computador (GPS)")
+    local o = posicao(2)
+    if not o then
+      falha(P.modem and "Sem posicao: sem sublevel e GPS sem sinal (torres na mesma altura?)"
+        or "Sem posicao: sem sublevel e sem modem sem fio para o GPS")
       return
     end
-    local o = posicao(2)
-    if not o then falha("GPS sem sinal: confira as 4 torres de GPS") return end
     local dH = mag(horiz(o, alvo))
     if dH > cfg.alcanceMax then
       falha(("Alvo a %d blocos (alcance max %d). Se o missil esta perto, o GPS esta dando posicao errada dentro da contraption.")
@@ -779,6 +911,16 @@ local function voar(opts)
       item(11, "Ogiva", ("lado %s, raio %d"):format(cfg.ladoOgiva, cfg.raioDetonacao), true)
       item(12, "Arma apos", ("%ds e %d blocos"):format(cfg.tempoArme, cfg.distArme), true)
     end
+    local giroTxt, giroBom
+    if not cfg.controleGiro then
+      giroTxt, giroBom = "desligado", false
+    elseif not giroVertical() then
+      giroTxt, giroBom = "sem sublevel", false
+    else
+      giroTxt = ("%d/%d motores"):format(S.mapeados, #P.vetores)
+      giroBom = S.mapeados >= 2
+    end
+    item(13, "Freio de giro", giroTxt, giroBom)
     if #ativos == 0 then
       escrever(2, 14, "Nenhum motor principal: so o vetor empurra.", colors.orange)
     end
@@ -844,11 +986,12 @@ local function voar(opts)
   local function controle()
     local n0, l0 = lerAngulos()
     local t0 = os.clock()
-    local ultX, ultY
+    local ultX, ultY, ultG
     local ciclos, tHz = 0, t0
     while true do
       sleep(0.05)
       local n, l = lerAngulos()
+      local wy = giroVertical()
       local t = os.clock()
       local dt = math.max(t - t0, 0.05)
       local rn, rl = (n - n0) / dt, (l - l0) / dt
@@ -871,9 +1014,52 @@ local function voar(opts)
       local cx = lim1(-inv * (cfg.kp * tx + cfg.kd * gx))
       local cy = lim1(-inv * (cfg.kp * ty + cfg.kd * gy))
 
-      if not ultX or math.abs(cx - ultX) > 0.01 or math.abs(cy - ultY) > 0.01 then
-        vetorComando(cx, cy)
-        ultX, ultY = cx, cy
+      -- rumo e freio de giro pela velocidade angular do sublevel.
+      -- psi = quanto o missil girou (sentido horario) desde o lancamento
+      local g = 0
+      if wy then
+        S.temGiro, S.wy = true, wy
+        S.psi = S.psi - wy * dt
+        if S.psi > math.pi then S.psi = S.psi - 2 * math.pi end
+        if S.psi < -math.pi then S.psi = S.psi + 2 * math.pi end
+        if cfg.controleGiro and S.mapeados >= 2 then
+          g = clamp(-cfg.kGiro * wy, -GIRO_MAX, GIRO_MAX) * (cfg.inverterGiro and -1 or 1)
+        end
+      end
+
+      -- teste do sentido do freio: toque + e depois -, medindo a rotacao.
+      -- O freio esta certo se a rotacao muda no mesmo sentido do toque.
+      local tg = S.tg
+      if tg and wy and not tg.res then
+        local tv = t - S.inicio
+        if tv >= 3 and tv < 3.8 then
+          g = TESTE_PULSO
+          tg.a1 = tg.a1 or wy
+          tg.b1 = wy
+        elseif tv >= 3.8 and tv < 4.6 then
+          g = -TESTE_PULSO
+          tg.a2 = tg.a2 or wy
+          tg.b2 = wy
+        elseif tv >= 4.6 then
+          if tg.a1 and tg.a2 then
+            -- a diferenca entre os dois toques cancela um giro que ja existia
+            tg.s = (tg.b1 - tg.a1) - (tg.b2 - tg.a2)
+            tg.inverter = tg.s < 0
+            if math.abs(tg.s) < 0.02 then
+              tg.res = "inconclusivo"
+            else
+              tg.res = (tg.inverter == cfg.inverterGiro) and "CERTO" or "TROCAR"
+            end
+          else
+            tg.res = "inconclusivo"
+          end
+        end
+      end
+
+      if not ultX or math.abs(cx - ultX) > 0.01 or math.abs(cy - ultY) > 0.01
+        or math.abs(g - ultG) > 0.01 then
+        vetorComando(cx, cy, g)
+        ultX, ultY, ultG = cx, cy, g
       end
 
       S.n, S.l, S.cx, S.cy = n, l, cx, cy
@@ -914,7 +1100,7 @@ local function voar(opts)
       if not p then
         if t - ultGps > 2 then S.alvoN, S.alvoL = 0, 0 end
         if t - ultGps > 8 then
-          S.motivo = "GPS perdido: voo cancelado"
+          S.motivo = "Posicao perdida (sublevel/GPS): voo cancelado"
           return
         end
       else
@@ -997,7 +1183,7 @@ local function voar(opts)
           local dtj = t - jT
           local an, al = (vn - jVn) / dtj, (vl - jVl) / dtj
           local cn, cl = sCN / nC, sCL / nC
-          if cfg.corrigirGiro and fase ~= "DECOLAGEM" and mag(cn, cl) > 4 and mag(an, al) > 0.8 then
+          if cfg.corrigirGiro and not S.temGiro and fase ~= "DECOLAGEM" and mag(cn, cl) > 4 and mag(an, al) > 0.8 then
             local e = atan2(cn * al - cl * an, cn * an + cl * al)
             S.psi = clamp(S.psi + 0.3 * e, -math.rad(60), math.rad(60))
           end
@@ -1017,7 +1203,8 @@ local function voar(opts)
         local kn = empuxoKN(m)
         total = total + kn
         local txt, tem = combustivel(m)
-        if tem then algum = true end
+        -- so conta motores que estao em uso (solidos desligados nao contam)
+        if tem and (m.classe ~= "solido" or cfg.usarSolidos) then algum = true end
         table.insert(linhas, { r = m.rotulo, nome = m.nome, kn = kn, t = txt, ok = tem })
       end
       if not guiado and #ativos > 0 and not algum then
@@ -1045,7 +1232,23 @@ local function voar(opts)
           math.deg(S.psi)), colors.orange)
       else
         escrever(x, 8, ("Empuxo %7.2f kN"):format(total), colors.orange)
+        local tg = S.tg
+        if tg then
+          local txt, c = "Teste giro: aguardando", colors.lightGray
+          if tg.res == "CERTO" then
+            txt, c = "Teste giro: CERTO", colors.lime
+          elseif tg.res == "TROCAR" then
+            txt, c = "Teste giro: INVERTIDO", colors.red
+          elseif tg.res then
+            txt = "Teste giro: inconclusivo"
+          elseif tg.a1 then
+            txt, c = "Teste giro: medindo...", colors.yellow
+          end
+          escrever(x, 10, txt, c)
+        end
       end
+      escrever(x, 11, ("Rot %4.0f g/s  pos %s"):format(math.deg(S.wy), fontePos),
+        math.abs(math.deg(S.wy)) > 90 and colors.red or colors.lightGray)
       local y = 12
       for _, li in ipairs(linhas) do
         if y > H - 2 then break end
@@ -1094,7 +1297,9 @@ local function voar(opts)
           return
         elseif msg.tipo == "ping" then
           rednet.send(id, { tipo = "status", nome = nomeRede(), versao = VERSAO,
-            pronto = false, emVoo = true, problemas = { "em voo" } }, PROTOCOLO)
+            pronto = false, emVoo = true, problemas = { "em voo" },
+            pos = S.pos, preset = cfg.nome, precisaCodigo = cfg.codigo ~= "",
+            vet = #P.vetores, liq = contar("liquido"), sol = contar("solido") }, PROTOCOLO)
         end
       end
     end
@@ -1129,11 +1334,27 @@ local function voar(opts)
     table.insert(linhas, "")
     table.insert(linhas, "Solidos podem continuar queimando!")
   end
-  local corFinal = (ok and not S.motivo:find("ABORT")) and colors.white or colors.red
+  local tg = S.tg
+  if tg and tg.res then
+    table.insert(linhas, "")
+    if tg.res == "CERTO" then
+      table.insert(linhas, "Freio de giro: sentido CERTO")
+    elseif tg.res == "TROCAR" then
+      table.insert(linhas, "Freio de giro: sentido INVERTIDO")
+    else
+      table.insert(linhas, "Freio de giro: teste inconclusivo (reagiu pouco)")
+    end
+  end
+  local corFinal = (ok and not S.motivo:upper():find("ABORT")) and colors.white or colors.red
   if base then
     avisoTempo("VOO ENCERRADO", linhas, corFinal, 8)
   else
     aviso("VOO ENCERRADO", linhas, corFinal)
+    if tg and tg.res == "TROCAR" and confirmar("FREIO DE GIRO",
+      "O teste indicou sentido invertido. Trocar 'Inverter freio de giro' e salvar?") then
+      cfg.inverterGiro = tg.inverter
+      salvarConfig()
+    end
   end
 end
 
@@ -1192,7 +1413,7 @@ local function modoRemoto()
         escrever(4, y, "- " .. pr, colors.orange)
         y = y + 1
       end
-      escrever(2, y + 1, "GPS", colors.lightGray)
+      escrever(2, y + 1, "Posicao", colors.lightGray)
       escrever(17, y + 1, posTxt, ultimaPos and colors.white or colors.red)
       escrever(2, y + 2, "Preset", colors.lightGray)
       escrever(17, y + 2, cfg.nome)
@@ -1208,7 +1429,7 @@ local function modoRemoto()
     local function atualizar()
       while true do
         local p = posicao(1)
-        posTxt = p and ("%.1f  %.1f  %.1f"):format(p.x, p.y, p.z) or "sem sinal"
+        posTxt = p and ("%.0f %.0f %.0f (%s)"):format(p.x, p.y, p.z, fontePos) or "sem sinal"
         tela()
         sleep(2)
       end
@@ -1299,6 +1520,9 @@ local GRUPOS = {
     { "kp", "KP forca da correcao", 0, 1 },
     { "kd", "KD amortecimento", 0, 1 },
     { "inverter", "Inverter correcao" },
+    { "controleGiro", "Frear giro (sublevel)" },
+    { "kGiro", "Forca do freio de giro", 0, 2 },
+    { "inverterGiro", "Inverter freio de giro" },
     { "abortar", "Abortar acima de (graus)", 5, 90 },
     { "contagem", "Contagem regressiva (s)", 0, 30 },
   } },
@@ -1372,7 +1596,7 @@ local function editarGrupo(grupo)
       cabecalho("CODIGO DE LANCAMENTO")
       escrever(2, 3, "A base vai pedir este codigo para lancar.", colors.lightGray)
       escrever(2, 4, "Deixe vazio para nao exigir.", colors.lightGray)
-      local r = perguntar(6, "Codigo: ", nil)
+      local r = perguntar(6, "Codigo: ", nil, true)
       cfg.codigo = r or ""
     elseif type(cfg[chave]) == "boolean" then
       cfg[chave] = not cfg[chave]
@@ -1383,6 +1607,7 @@ local function editarGrupo(grupo)
       escrever(2, 4, ("Valor entre %s e %s"):format(min, max), colors.lightGray)
       local r = perguntar(6, "Novo valor: ", cfg[chave])
       local v = r and tonumber((r:gsub(",", ".")))
+      if v and INTEIROS[chave] then v = math.floor(v + 0.5) end
       if v and v >= min and v <= max then
         cfg[chave] = v
       else
@@ -1405,7 +1630,7 @@ local function ajustes()
       editarGrupo(GRUPOS[i])
     elseif confirmar("AJUSTES", "Restaurar todos os ajustes para o padrao?") then
       local manter = { "offX", "offZ", "eixoN", "sinalN", "eixoL", "sinalL", "gimbalOk",
-        "eixoX", "sinalX", "eixoY", "sinalY", "bocalOk", "nome", "iniciarRemoto" }
+        "eixoX", "sinalX", "eixoY", "sinalY", "bocalOk", "posMotores", "nome", "iniciarRemoto" }
       local novo = copiar(PADRAO)
       for _, k in ipairs(manter) do novo[k] = cfg[k] end
       cfg = novo
@@ -1583,17 +1808,20 @@ local function bocalManual()
     aviso("ERRO", { "Vector thruster nao encontrado." }, colors.red)
     return
   end
-  local x, y, pot = 0, 0, 0
+  local x, y, pot, giro = 0, 0, 0, 0
   local PASSO = 0.1
   local v = P.vetores[1].p
 
   while true do
-    vetorComando(x, y)
+    vetorComando(x, y, giro)
     vetorEmpuxo(pot)
     cabecalho("BOCAL MANUAL")
     escrever(2, 3, "SETAS   inclinar o bocal", colors.lightGray)
     escrever(2, 4, "W / S   empuxo do vetor", colors.lightGray)
     escrever(2, 5, "ESPACO  centralizar", colors.lightGray)
+    escrever(2, 6, "Q / E   freio de giro (bocais em catavento)", colors.lightGray)
+    escrever(2, 10, ("Giro    %5.2f   motores com lado: %d/%d"):format(giro,
+      motoresMapeados(), #P.vetores), giro ~= 0 and colors.cyan or colors.white)
     escrever(2, 7, ("Alvo    X %5.2f   Y %5.2f"):format(x, y))
     escrever(2, 8, ("Atual   X %5.2f   Y %5.2f"):format(
       chamar(v, "getVectorX") or 0, chamar(v, "getVectorY") or 0))
@@ -1610,7 +1838,9 @@ local function bocalManual()
       elseif k == keys.down then y = clamp(y - PASSO, -1, 1)
       elseif k == keys.w then pot = clamp(pot + PASSO, 0, 1)
       elseif k == keys.s then pot = clamp(pot - PASSO, 0, 1)
-      elseif k == keys.space then x, y = 0, 0
+      elseif k == keys.q then giro = clamp(giro - 0.25, -0.5, 0.5)
+      elseif k == keys.e then giro = clamp(giro + 0.25, -0.5, 0.5)
+      elseif k == keys.space then x, y, giro = 0, 0, 0
       elseif k == keys.backspace then return end
     end
     os.cancelTimer(timer)
@@ -1619,9 +1849,9 @@ end
 
 local function testeGps()
   detectar()
-  if not P.modem then
-    aviso("TESTE GPS", { "Sem modem sem fio encostado direto no computador.",
-      "O GPS nao funciona por Wired Modem." }, colors.red)
+  if not P.modem and not sublevelPose() then
+    aviso("TESTE GPS", { "Sem posicao: o computador nao esta num sublevel",
+      "e nao tem modem sem fio encostado (GPS)." }, colors.red)
     return
   end
   local amostras, falhas = 0, 0
@@ -1633,7 +1863,7 @@ local function testeGps()
       if p then amostras = amostras + 1 else falhas = falhas + 1 end
       cabecalho("TESTE GPS")
       if p then
-        escrever(2, 3, "Posicao do missil:", colors.lightGray)
+        escrever(2, 3, "Posicao do missil (" .. fontePos .. "):", colors.lightGray)
         escrever(2, 4, ("X %.2f   Y %.2f   Z %.2f"):format(p.x, p.y, p.z), colors.lime)
         local dH = mag(horiz(p, { x = cfg.alvoX, y = cfg.alvoY, z = cfg.alvoZ }))
         escrever(2, 6, ("Ultimo alvo (%d %d %d): %d blocos"):format(math.floor(cfg.alvoX),
@@ -1706,8 +1936,9 @@ local function principal()
       { ("Gimbal %s  Vetor %d  Liq %d  Sol %d  Ion %d%s"):format(
           P.gimbal and "OK" or "--", #P.vetores, contar("liquido"),
           contar("solido"), contar("ion"), extra), colors.lightGray },
-      { ("Calibracao: gimbal %s  bocal %s"):format(
-          cfg.gimbalOk and "OK" or "PENDENTE", cfg.bocalOk and "OK" or "PENDENTE"),
+      { ("Calib: gimbal %s  bocal %s  giro %d/%d"):format(
+          cfg.gimbalOk and "OK" or "PENDENTE", cfg.bocalOk and "OK" or "PENDENTE",
+          motoresMapeados(), #P.vetores),
         (cfg.gimbalOk and cfg.bocalOk) and colors.lime or colors.orange },
       { ("Rede: %s  %s"):format(nomeRede(), P.modem and "(modem OK)" or "(SEM MODEM)"),
         P.modem and colors.lightGray or colors.orange },
@@ -1716,7 +1947,7 @@ local function principal()
     }
     local acoes = {
       modoRemoto, lancarLocal, voar, calibrarGimbal, calibrarBocal,
-      ajustes, presets, testes,
+      calibrarMotores, ajustes, presets, testes,
     }
     local i = menu("MISSIL v" .. VERSAO, {
       "Modo remoto (aguardar base)",
@@ -1724,12 +1955,13 @@ local function principal()
       "Teste de estabilizacao",
       "Calibrar gimbal",
       "Calibrar bocal",
+      "Calibrar giro (lado dos motores)",
       "Ajustes",
       "Presets (disquete)",
       "Testes",
       "Sair",
     }, info)
-    if not i or i == 9 then return end
+    if not i or i == 10 then return end
 
     local ok, err = pcall(acoes[i])
     detectar()
@@ -2026,7 +2258,7 @@ local function procurar()
   local ops = {}
   for _, a in ipairs(achados) do
     table.insert(ops, ("%-22s %s"):format(a.st.nome or ("#" .. a.id),
-      a.st.pronto and "PRONTO" or "NAO PRONTO"))
+      a.st.emVoo and "EM VOO" or (a.st.pronto and "PRONTO" or "NAO PRONTO")))
   end
   table.insert(ops, "Voltar")
   local i = menu("SELECIONAR MISSIL", ops)
