@@ -49,25 +49,43 @@ sleep(1.5)
 -- 2. TESTE INDIVIDUAL DOS 4 MOTORES (2x2)
 print("--- [2/4] TESTE INDIVIDUAL DOS 4 MOTORES ---")
 local motores = {
-    { nome = "Superior Esquerdo (TL)", side = config.THRUSTER_TL_SIDE },
-    { nome = "Superior Direito (TR)",  side = config.THRUSTER_TR_SIDE },
-    { nome = "Inferior Esquerdo (BL)", side = config.THRUSTER_BL_SIDE },
-    { nome = "Inferior Direito (BR)",  side = config.THRUSTER_BR_SIDE },
+    { nome = "Superior Esquerdo (TL)", id = config.THRUSTER_TL },
+    { nome = "Superior Direito (TR)",  id = config.THRUSTER_TR },
+    { nome = "Inferior Esquerdo (BL)", id = config.THRUSTER_BL },
+    { nome = "Inferior Direito (BR)",  id = config.THRUSTER_BR },
 }
 
+local function setMotorThrust(motor_id, val)
+    if not motor_id then return false end
+    if peripheral.getType(motor_id) then
+        pcall(peripheral.call, motor_id, "setThrust", val)
+        pcall(peripheral.call, motor_id, "setThrottle", val)
+        return "Peripheral"
+    elseif motor_id == "left" or motor_id == "right" or motor_id == "top" or motor_id == "bottom" or motor_id == "front" or motor_id == "back" then
+        pcall(redstone.setAnalogOutput, motor_id, val)
+        return "Redstone"
+    end
+    return false
+end
+
 for _, m in ipairs(motores) do
-    if m.side then
-        log("Testando " .. m.nome .. " [Lado Redstone: " .. m.side .. "]")
-        -- Ramp-up gradual
-        for p = 0, 15, 5 do
-            pcall(redstone.setAnalogOutput, m.side, p)
-            sleep(0.1)
+    if m.id then
+        local tipo = setMotorThrust(m.id, 0)
+        if tipo then
+            log("Testando " .. m.nome .. " [" .. tipo .. ": " .. m.id .. "]")
+            -- Ramp-up gradual
+            for p = 0, 15, 5 do
+                setMotorThrust(m.id, p)
+                sleep(0.1)
+            end
+            sleep(0.4)
+            setMotorThrust(m.id, 0)
+            print("   -> Motor " .. m.nome .. " TESTADO [OK]")
+        else
+            print("   -> Motor " .. m.nome .. " configurado errado: " .. tostring(m.id))
         end
-        sleep(0.4)
-        pcall(redstone.setAnalogOutput, m.side, 0)
-        print("   -> Motor " .. m.nome .. " TESTADO [OK]")
     else
-        print("   -> Motor " .. m.nome .. " sem lado configurado!")
+        print("   -> Motor " .. m.nome .. " sem ID configurado no config.lua!")
     end
     sleep(0.3)
 end
@@ -86,10 +104,10 @@ local function aplicarDiferencial(throttle, pitch, yaw)
     local val_bl = math.max(0, math.min(config.THROTTLE_MAX, math.floor(throttle + p_factor + y_factor + 0.5)))
     local val_br = math.max(0, math.min(config.THROTTLE_MAX, math.floor(throttle + p_factor - y_factor + 0.5)))
 
-    if config.THRUSTER_TL_SIDE then pcall(redstone.setAnalogOutput, config.THRUSTER_TL_SIDE, val_tl) end
-    if config.THRUSTER_TR_SIDE then pcall(redstone.setAnalogOutput, config.THRUSTER_TR_SIDE, val_tr) end
-    if config.THRUSTER_BL_SIDE then pcall(redstone.setAnalogOutput, config.THRUSTER_BL_SIDE, val_bl) end
-    if config.THRUSTER_BR_SIDE then pcall(redstone.setAnalogOutput, config.THRUSTER_BR_SIDE, val_br) end
+    setMotorThrust(config.THRUSTER_TL, val_tl)
+    setMotorThrust(config.THRUSTER_TR, val_tr)
+    setMotorThrust(config.THRUSTER_BL, val_bl)
+    setMotorThrust(config.THRUSTER_BR, val_br)
 end
 
 log("Vetorização PITCH UP (Subir +45°)...")

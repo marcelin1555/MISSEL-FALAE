@@ -20,18 +20,13 @@ config.MODEM_SIDE     = nil  -- nil = auto-detectar
 -- "tilt" = Usa Tilt Adapters (legado)
 config.MODO_PROPULSAO = "quad_vector"
 
--- Lados de Redstone para os 4 Thrusters 2x2 (Empuxo Diferencial sem Tilt)
--- TL = Superior Esquerdo, TR = Superior Direito, BL = Inferior Esquerdo, BR = Inferior Direito
-config.THRUSTER_TL_SIDE = "left"    -- Lado do computador para Thruster Superior Esquerdo
-config.THRUSTER_TR_SIDE = "right"   -- Lado do computador para Thruster Superior Direito
-config.THRUSTER_BL_SIDE = "bottom"  -- Lado do computador para Thruster Inferior Esquerdo
-config.THRUSTER_BR_SIDE = "back"    -- Lado do computador para Thruster Inferior Direito
-
--- Se usar Wired Modems com nomes específicos para os 4 Thrusters:
-config.THRUSTER_TL_NAME = nil -- ex: "vector_thruster_0"
-config.THRUSTER_TR_NAME = nil -- ex: "vector_thruster_1"
-config.THRUSTER_BL_NAME = nil -- ex: "vector_thruster_2"
-config.THRUSTER_BR_NAME = nil -- ex: "vector_thruster_3"
+-- Conexão dos 4 Motores (Quad 2x2)
+-- Pode ser o NOME DA FACE (se usar Redstone Links/Fios): "left", "right", "bottom", "back", "top", "front"
+-- OU pode ser o NOME DO PERIFÉRICO (se usar Wired Modems): ex "vector_thruster_0"
+config.THRUSTER_TL = "left"    -- Motor Superior Esquerdo
+config.THRUSTER_TR = "right"   -- Motor Superior Direito
+config.THRUSTER_BL = "bottom"  -- Motor Inferior Esquerdo
+config.THRUSTER_BR = "back"    -- Motor Inferior Direito
 
 config.THRUSTER_SIDE    = "back" -- Lado do sinal de empuxo mestre (fallback)
 config.DETONACAO_SIDE   = "top"  -- Lado que ativa a detonação (TNT/Ogiva)
