@@ -4,7 +4,7 @@
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "3.1"
+local VERSAO = "3.2"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -225,7 +225,8 @@ local PADRAO = {
   bocalOk = false,
   posMotores = {}, -- lado de cada vector thruster (N/S/L/O/C)
   -- voo
-  kp = 0.04, kd = 0.015, inverter = false,
+  kp = 0.04, ki = 0, kd = 0.015, inverter = false,
+  taxaIncl = 15, -- graus/s: rapidez maxima da inclinacao pedida pela navegacao
   controleGiro = true, kGiro = 0.15, inverterGiro = false,
   empuxoVetor = 1.0, acelerador = 1.0, usarSolidos = true,
   abortar = 60, contagem = 3,
@@ -371,9 +372,13 @@ local function acelerar(m, pot)
   pcall(m.p.setPowerNormalized, pot)
 end
 
+-- Cada chamada a periferico espera o proximo tick do jogo (0,05 s).
+-- Disparando todas juntas com parallel.waitForAll elas cabem num tick so.
+
 -- x, y: inclinacao igual para todos os bocais
 -- giro: forca tangencial para frear a rotacao (cada motor inclina de lado)
-local function vetorComando(x, y, giro)
+-- adiciona em 'tarefas' uma chamada setVector por motor
+local function tarefasVetor(tarefas, x, y, giro)
   local inv = cfg.inverter and -1 or 1
   for _, v in ipairs(P.vetores) do
     local vx, vy = x, y
@@ -384,8 +389,14 @@ local function vetorComando(x, y, giro)
       vx = lim1(vx - inv * cfg.sinalX * f[cfg.eixoX])
       vy = lim1(vy - inv * cfg.sinalY * f[cfg.eixoY])
     end
-    pcall(v.p.setVector, vx, vy)
+    table.insert(tarefas, function() pcall(v.p.setVector, vx, vy) end)
   end
+  return tarefas
+end
+
+local function vetorComando(x, y, giro)
+  local tarefas = tarefasVetor({}, x, y, giro)
+  if #tarefas > 0 then parallel.waitForAll(table.unpack(tarefas)) end
 end
 
 -- quantos vector thrusters tem lado definido (fora do centro)
@@ -399,11 +410,15 @@ local function motoresMapeados()
 end
 
 local function vetorEmpuxo(pot)
+  local tarefas = {}
   for _, v in ipairs(P.vetores) do
-    if not pcall(v.p.setThrustNormalized, pot) then
-      pcall(v.p.setPowerNormalized, pot)
-    end
+    table.insert(tarefas, function()
+      if not pcall(v.p.setThrustNormalized, pot) then
+        pcall(v.p.setPowerNormalized, pot)
+      end
+    end)
   end
+  if #tarefas > 0 then parallel.waitForAll(table.unpack(tarefas)) end
 end
 
 local function desligarTudo()
@@ -829,7 +844,7 @@ local function voar(opts)
     fase = guiado and "DECOLAGEM" or "ESTABILIZAR",
     motivo = "Fim", detonou = false, armado = false,
     n = 0, l = 0, giro = 0, cx = 0, cy = 0, hz = 0,
-    alvoN = 0, alvoL = 0, psi = 0, incMax = 0, wy = 0, mapeados = 0,
+    alvoN = 0, alvoL = 0, psi = 0, incMax = 0, wy = 0, mapeados = 0, ix = 0, iy = 0,
     acel = cfg.acelerador, integral = cfg.acelBase,
     vel = { n = 0, l = 0, y = 0 }, eventos = {},
   }
@@ -979,16 +994,37 @@ local function voar(opts)
   local function controle()
     local n0, l0 = lerAngulos()
     local t0 = os.clock()
-    local ultX, ultY, ultG
     local ciclos, tHz = 0, t0
+    local envio = nil          -- comando calculado no ciclo anterior {x, y, giro}
+    local ultX, ultY, ultG     -- ultimo comando enviado aos bocais
+    local rnF, rlF = 0, 0      -- velocidade de inclinacao filtrada
+    local iX, iY = 0, 0        -- integral do PID (graus * s)
+    local refN, refL = 0, 0    -- inclinacao pedida, com rapidez limitada
     while true do
-      sleep(0.05)
-      local n, l = lerAngulos()
-      local wy = giroVertical()
+      -- Um tick por ciclo: le o gimbal e o giro e envia o comando do ciclo
+      -- anterior, tudo junto. Assim o controle roda a ate 20 Hz.
+      local n, l, wy
+      local tarefas = {
+        function() n, l = lerAngulos() end,
+        function() wy = giroVertical() end,
+      }
+      if envio then
+        tarefasVetor(tarefas, envio[1], envio[2], envio[3])
+        ultX, ultY, ultG = envio[1], envio[2], envio[3]
+        envio = nil
+      end
+      parallel.waitForAll(table.unpack(tarefas))
       local t = os.clock()
+      if t - t0 < 0.025 then
+        -- as chamadas nao esperaram o jogo: garante um tick por ciclo
+        sleep(0)
+        t = os.clock()
+      end
       local dt = math.max(t - t0, 0.05)
       local rn, rl = (n - n0) / dt, (l - l0) / dt
       n0, l0, t0 = n, l, t
+      rnF = rnF + 0.5 * (rn - rnF)
+      rlF = rlF + 0.5 * (rl - rlF)
 
       local inc = math.max(math.abs(n), math.abs(l))
       S.incMax = math.max(S.incMax, inc)
@@ -997,15 +1033,32 @@ local function voar(opts)
         return
       end
 
-      -- erro = inclinacao atual - inclinacao pedida pela navegacao
-      local ang, giro = { n - S.alvoN, l - S.alvoL }, { rn, rl }
+      -- inclinacao pedida pela navegacao, mudando no maximo taxaIncl graus/s
+      local passo = cfg.taxaIncl * dt
+      refN = refN + clamp(S.alvoN - refN, -passo, passo)
+      refL = refL + clamp(S.alvoL - refL, -passo, passo)
+
+      -- PID: erro = inclinacao atual - inclinacao pedida
+      local ang, giro = { n - refN, l - refL }, { rnF, rlF }
       local inv = cfg.inverter and -1 or 1
       local tx = ang[cfg.eixoX] * cfg.sinalX
       local ty = ang[cfg.eixoY] * cfg.sinalY
       local gx = giro[cfg.eixoX] * cfg.sinalX
       local gy = giro[cfg.eixoY] * cfg.sinalY
-      local cx = lim1(-inv * (cfg.kp * tx + cfg.kd * gx))
-      local cy = lim1(-inv * (cfg.kp * ty + cfg.kd * gy))
+      local function pid(e, i, d)
+        return -inv * (cfg.kp * e + cfg.ki * i + cfg.kd * d)
+      end
+      -- integral limitada a 30% do bocal e congelada com o bocal no limite
+      if cfg.ki > 0 then
+        local lim = 0.3 / cfg.ki
+        if math.abs(pid(tx, iX, gx)) < 1 then iX = clamp(iX + tx * dt, -lim, lim) end
+        if math.abs(pid(ty, iY, gy)) < 1 then iY = clamp(iY + ty * dt, -lim, lim) end
+      else
+        iX, iY = 0, 0
+      end
+      local cx = lim1(pid(tx, iX, gx))
+      local cy = lim1(pid(ty, iY, gy))
+      S.ix, S.iy = cfg.ki * iX, cfg.ki * iY
 
       -- rumo e freio de giro pela velocidade angular do sublevel.
       -- psi = quanto o missil girou (sentido horario) desde o lancamento
@@ -1049,14 +1102,14 @@ local function voar(opts)
         end
       end
 
+      -- envia no proximo ciclo, junto com a proxima leitura, se mudou
       if not ultX or math.abs(cx - ultX) > 0.01 or math.abs(cy - ultY) > 0.01
         or math.abs(g - ultG) > 0.01 then
-        vetorComando(cx, cy, g)
-        ultX, ultY, ultG = cx, cy, g
+        envio = { cx, cy, g }
       end
 
       S.n, S.l, S.cx, S.cy = n, l, cx, cy
-      S.giro = math.max(math.abs(rn), math.abs(rl))
+      S.giro = math.max(math.abs(rnF), math.abs(rlF))
       ciclos = ciclos + 1
       if t - tHz >= 1 then
         S.hz = ciclos / (t - tHz)
@@ -1190,19 +1243,26 @@ local function voar(opts)
 
   -- TAREFA: tela e telemetria para a base
   local function telemetria()
+    local total, linhas, ultLeitura = 0, {}, nil
     while true do
-      local algum, total, linhas = false, 0, {}
-      for _, m in ipairs(P.motores) do
-        local kn = empuxoKN(m)
-        total = total + kn
-        local txt, tem = combustivel(m)
-        -- so conta motores que estao em uso (solidos desligados nao contam)
-        if tem and (m.classe ~= "solido" or cfg.usarSolidos) then algum = true end
-        table.insert(linhas, { r = m.rotulo, nome = m.nome, kn = kn, t = txt, ok = tem })
-      end
-      if not guiado and #ativos > 0 and not algum then
-        S.motivo = "Combustivel esgotado"
-        return
+      -- ler os motores custa varios ticks: so a cada 2 s, para nao roubar
+      -- tempo do controle
+      if not ultLeitura or os.clock() - ultLeitura >= 2 then
+        local algum = false
+        total, linhas = 0, {}
+        for _, m in ipairs(P.motores) do
+          local kn = empuxoKN(m)
+          total = total + kn
+          local txt, tem = combustivel(m)
+          -- so conta motores que estao em uso (solidos desligados nao contam)
+          if tem and (m.classe ~= "solido" or cfg.usarSolidos) then algum = true end
+          table.insert(linhas, { r = m.rotulo, nome = m.nome, kn = kn, t = txt, ok = tem })
+        end
+        ultLeitura = os.clock()
+        if not guiado and #ativos > 0 and not algum then
+          S.motivo = "Combustivel esgotado"
+          return
+        end
       end
 
       local tv = os.clock() - S.inicio
@@ -1211,7 +1271,8 @@ local function voar(opts)
       local x = 18
       escrever(x, 3, ("Incl.  N %5.1f  L %5.1f"):format(S.n, S.l))
       escrever(x, 4, ("Pedido N %5.1f  L %5.1f"):format(S.alvoN, S.alvoL), colors.cyan)
-      escrever(x, 5, ("Bocal  X %5.2f  Y %5.2f"):format(S.cx, S.cy), colors.lightBlue)
+      escrever(x, 5, ("Bocal %5.2f %5.2f  I %5.2f %5.2f"):format(S.cx, S.cy, S.ix, S.iy),
+        colors.lightBlue)
       escrever(x, 6, ("Ctrl %4.1f Hz   Giro %4.0f/s"):format(S.hz, S.giro),
         S.hz >= 5 and colors.lime or colors.red)
       if guiado then
@@ -1511,6 +1572,7 @@ local GRUPOS = {
     { "acelerador", "Acelerador decolagem (0-1)", 0, 1 },
     { "usarSolidos", "Usar motores solidos" },
     { "kp", "KP forca da correcao", 0, 1 },
+    { "ki", "KI corrige desvio fixo", 0, 1 },
     { "kd", "KD amortecimento", 0, 1 },
     { "inverter", "Inverter correcao" },
     { "controleGiro", "Frear giro (sublevel)" },
@@ -1526,6 +1588,7 @@ local GRUPOS = {
     { "velSubida", "Velocidade de subida max", 1, 40 },
     { "velDescida", "Velocidade de mergulho", 1, 40 },
     { "inclMax", "Inclinacao max (graus)", 2, 45 },
+    { "taxaIncl", "Rapidez da inclinacao (g/s)", 1, 90 },
     { "distAtaque", "Distancia p/ mergulho", 3, 100 },
     { "kPos", "Ganho de posicao", 0, 2 },
     { "kVel", "Ganho de velocidade", 0, 10 },
