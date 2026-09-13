@@ -14,29 +14,16 @@ config.INTERVALO_TELEMETRIA = 0.25 -- segundos entre pacotes de telemetria
 -- === PERIFÉRICOS & PROPULSÃO ===
 config.MODEM_SIDE     = nil  -- nil = auto-detectar
 
--- Modo de Propulsão:
--- "quad_vector" = 4 Thrusters em arranjo 2x2 (Sem Tilt Adapter - Empuxo Diferencial e Vetorização Direta)
--- "direct_vector" = Thrusters com vetorização direta por periférico
--- "tilt" = Usa Tilt Adapters (legado)
-config.MODO_PROPULSAO = "quad_vector"
-
--- Conexão dos 4 Motores (Quad 2x2)
--- Pode ser o NOME DA FACE (se usar Redstone Links/Fios): "left", "right", "bottom", "back", "top", "front"
--- OU pode ser o NOME DO PERIFÉRICO (se usar Wired Modems): ex "vector_thruster_0"
-config.THRUSTER_TL = "left"    -- Motor Superior Esquerdo
-config.THRUSTER_TR = "right"   -- Motor Superior Direito
-config.THRUSTER_BL = "bottom"  -- Motor Inferior Esquerdo
-config.THRUSTER_BR = "back"    -- Motor Inferior Direito
-
-config.THRUSTER_SIDE    = "back" -- Lado do sinal de empuxo mestre (fallback)
+-- Os motores sólidos e o vector thruster são detectados automaticamente
 config.DETONACAO_SIDE   = "top"  -- Lado que ativa a detonação (TNT/Ogiva)
 
 -- === ESTABILIZAÇÃO & GIMBAL (Aeronautics / Gyroscope / IMU) ===
 config.USAR_GIMBAL      = true  -- Auto-detectar Gimbal do Aeronautics para estabilização PID
-config.PID_KP           = 0.5   -- Ganho Proporcional (força da correção)
-config.PID_KI           = 0.02  -- Ganho Integral (elimina erro acumulado)
-config.PID_KD           = 0.1   -- Ganho Derivativo (suaviza oscilações)
-config.ESTABILIZAR_ROLL = true  -- Evita que o míssil gire em torno de si mesmo (Roll lock)
+config.PID_KP           = 0.04  -- Ganho Proporcional (força da correção, refinado)
+config.PID_KI           = 0.00  -- Ganho Integral (elimina erro acumulado, desativado no script base)
+config.PID_KD           = 0.015 -- Ganho Derivativo (suaviza oscilações, refinado)
+config.INVERTER_BOCAL   = false -- Altere para true se a correção empurrar pro lado errado no voo
+config.ESTABILIZAR_ROLL = false -- Roll lock desativado por padrão (difícil com 1 vetor)
 
 -- === CONTROLE DE VOO ===
 config.THROTTLE_MIN     = 0    -- nível mínimo de redstone (0-15)

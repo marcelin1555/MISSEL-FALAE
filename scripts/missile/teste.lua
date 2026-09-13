@@ -1,12 +1,6 @@
 -- ============================================
--- MISSIL TELEGUIADO - BATERIA DE TESTES (TESTE DE BANCADA)
--- CC:Tweaked + Create Propulsion + Aeronautics
--- ============================================
--- Teste de bancada / ignição em solo para verificar:
--- 1. Detecção de modem e Gimbal Aeronautics
--- 2. Ignição individual dos 4 Motores 2x2 (TL, TR, BL, BR)
--- 3. Varredura de vetorização de empuxo (Pitch e Yaw)
--- 4. Teste de potência total (Throttle Máximo 3s)
+-- MISSIL TELEGUIADO - BATERIA DE TESTES
+-- Arquitetura: Motores Sólidos (Propulsão) + 1 Vector Thruster (Direção)
 -- ============================================
 
 local config = require("config")
@@ -14,8 +8,7 @@ local config = require("config")
 term.clear()
 term.setCursorPos(1, 1)
 print("========================================")
-print("  🚀 BATERIA DE TESTES DO MÍSSIL (2x2)")
-print("  Diagnóstico de Bancada e Motores")
+print("  🚀 TESTE DO MÍSSIL (Main + Vetor)")
 print("========================================")
 print()
 
@@ -24,126 +17,106 @@ local function log(msg)
 end
 
 -- 1. VERIFICAÇÃO DE PERIFÉRICOS
-print("--- [1/4] TESTE DE PERIFÉRICOS & SENSORES ---")
+print("--- [1/3] TESTE DE PERIFÉRICOS ---")
 local modems = { peripheral.find("modem") }
 if #modems > 0 then
-    print("  [OK] Modem Wireless encontrado (" .. #modems .. ")")
+    print("  [OK] Modem Wireless encontrado")
 else
     print("  [AVISO] Nenhum modem wireless encontrado!")
 end
 
-local gimbals = 0
-for _, name in ipairs(peripheral.getNames()) do
-    local t = string.lower(peripheral.getType(name) or "")
-    if string.find(t, "gimbal") or string.find(t, "gyro") or string.find(t, "ship") or string.find(t, "inertial") then
-        gimbals = gimbals + 1
-        print("  [OK] Gimbal/Giroscópio encontrado: " .. name)
+local gimbal = peripheral.find("gimbal_sensor")
+if gimbal then
+    print("  [OK] Gimbal/Giroscópio encontrado")
+else
+    print("  [AVISO] Gimbal físico não detectado")
+end
+
+local vetor = peripheral.find("vector_thruster") or peripheral.find("liquid_vector_thruster") or peripheral.find("creative_vector_thruster")
+if vetor then
+    print("  [OK] Vector Thruster encontrado")
+else
+    print("  [AVISO] Nenhum Vector Thruster encontrado!")
+end
+
+local solidos = {}
+for _, nome in ipairs(peripheral.getNames()) do
+    local tipo = peripheral.getType(nome) or ""
+    if string.find(tipo, "thruster") and not string.find(tipo, "vector") then
+        table.insert(solidos, { nome = nome, p = peripheral.wrap(nome) })
     end
 end
-if gimbals == 0 then
-    print("  [INFO] Gimbal físico não detectado (usando modo simulação)")
+print("  [INFO] Motores principais encontrados: " .. #solidos)
+if config.THRUSTER_SIDE then
+    print("  [INFO] Redstone (Main) ativo na face: " .. config.THRUSTER_SIDE)
 end
+
 print()
 sleep(1.5)
 
--- 2. TESTE INDIVIDUAL DOS 4 MOTORES (2x2)
-print("--- [2/4] TESTE INDIVIDUAL DOS 4 MOTORES ---")
-local motores = {
-    { nome = "Superior Esquerdo (TL)", id = config.THRUSTER_TL },
-    { nome = "Superior Direito (TR)",  id = config.THRUSTER_TR },
-    { nome = "Inferior Esquerdo (BL)", id = config.THRUSTER_BL },
-    { nome = "Inferior Direito (BR)",  id = config.THRUSTER_BR },
-}
+-- 2. TESTE DOS MOTORES PRINCIPAIS
+print("--- [2/3] TESTE DE EMPUXO (MAIN) ---")
 
-local function setMotorThrust(motor_id, val)
-    if not motor_id then return false end
-    if peripheral.getType(motor_id) then
-        pcall(peripheral.call, motor_id, "setThrust", val)
-        pcall(peripheral.call, motor_id, "setThrottle", val)
-        return "Peripheral"
-    elseif motor_id == "left" or motor_id == "right" or motor_id == "top" or motor_id == "bottom" or motor_id == "front" or motor_id == "back" then
-        pcall(redstone.setAnalogOutput, motor_id, val)
-        return "Redstone"
-    end
-    return false
-end
-
-for _, m in ipairs(motores) do
-    if m.id then
-        local tipo = setMotorThrust(m.id, 0)
-        if tipo then
-            log("Testando " .. m.nome .. " [" .. tipo .. ": " .. m.id .. "]")
-            -- Ramp-up gradual
-            for p = 0, 15, 5 do
-                setMotorThrust(m.id, p)
-                sleep(0.1)
+local function setMotoresSolidos(pot)
+    for _, m in ipairs(solidos) do
+        pcall(function() 
+            if m.p.setPowerNormalized then m.p.setPowerNormalized(pot) 
+            elseif m.p.setThrustNormalized then m.p.setThrustNormalized(pot)
+            elseif m.p.setThrust then m.p.setThrust(pot * 15)
+            elseif m.p.setThrottle then m.p.setThrottle(pot * 15)
             end
-            sleep(0.4)
-            setMotorThrust(m.id, 0)
-            print("   -> Motor " .. m.nome .. " TESTADO [OK]")
-        else
-            print("   -> Motor " .. m.nome .. " configurado errado: " .. tostring(m.id))
-        end
-    else
-        print("   -> Motor " .. m.nome .. " sem ID configurado no config.lua!")
+        end)
     end
-    sleep(0.3)
+    if config.THRUSTER_SIDE then
+        pcall(redstone.setAnalogOutput, config.THRUSTER_SIDE, math.floor(pot * 15))
+    end
+end
+
+if #solidos > 0 or config.THRUSTER_SIDE then
+    log("Acelerando Motores Principais...")
+    for p = 0, 1.0, 0.2 do
+        setMotoresSolidos(p)
+        sleep(0.2)
+    end
+    sleep(0.5)
+    setMotoresSolidos(0)
+    print("  -> Teste de Motores Principais [OK]")
+else
+    print("  -> Pulando (Nenhum motor principal detectado)")
 end
 print()
 sleep(1.5)
 
--- 3. TESTE DE VARREDURO DE VETORIZAÇÃO (PITCH & YAW)
-print("--- [3/4] TESTE DE VARREDURA VETORIAL ---")
 
-local function aplicarDiferencial(throttle, pitch, yaw)
-    local p_factor = (pitch / config.TILT_MAX_ANGLE) * (config.THROTTLE_MAX / 2)
-    local y_factor = (yaw / config.TILT_MAX_ANGLE) * (config.THROTTLE_MAX / 2)
+-- 3. TESTE DO VETOR
+print("--- [3/3] TESTE DE VETORIZAÇÃO ---")
 
-    local val_tl = math.max(0, math.min(config.THROTTLE_MAX, math.floor(throttle - p_factor + y_factor + 0.5)))
-    local val_tr = math.max(0, math.min(config.THROTTLE_MAX, math.floor(throttle - p_factor - y_factor + 0.5)))
-    local val_bl = math.max(0, math.min(config.THROTTLE_MAX, math.floor(throttle + p_factor + y_factor + 0.5)))
-    local val_br = math.max(0, math.min(config.THROTTLE_MAX, math.floor(throttle + p_factor - y_factor + 0.5)))
+if vetor then
+    log("Vetorização X Positivo...")
+    vetor.setVector(0.5, 0)
+    vetor.setThrustNormalized(0.1)
+    sleep(1.0)
 
-    setMotorThrust(config.THRUSTER_TL, val_tl)
-    setMotorThrust(config.THRUSTER_TR, val_tr)
-    setMotorThrust(config.THRUSTER_BL, val_bl)
-    setMotorThrust(config.THRUSTER_BR, val_br)
+    log("Vetorização X Negativo...")
+    vetor.setVector(-0.5, 0)
+    sleep(1.0)
+
+    log("Vetorização Y Positivo...")
+    vetor.setVector(0, 0.5)
+    sleep(1.0)
+
+    log("Vetorização Y Negativo...")
+    vetor.setVector(0, -0.5)
+    sleep(1.0)
+
+    vetor.setVector(0, 0)
+    vetor.setThrustNormalized(0)
+    print("  -> Teste de Vetorização [OK]")
+else
+    print("  -> Pulando (Nenhum Vector Thruster detectado)")
 end
 
-log("Vetorização PITCH UP (Subir +45°)...")
-aplicarDiferencial(10, 45, 0)
-sleep(0.8)
-
-log("Vetorização PITCH DOWN (Descer -45°)...")
-aplicarDiferencial(10, -45, 0)
-sleep(0.8)
-
-log("Vetorização YAW LEFT (Esquerda -45°)...")
-aplicarDiferencial(10, 0, -45)
-sleep(0.8)
-
-log("Vetorização YAW RIGHT (Direita +45°)...")
-aplicarDiferencial(10, 0, 45)
-sleep(0.8)
-
-aplicarDiferencial(0, 0, 0)
-print("  -> Varredura de Vetores Concluída [OK]")
 print()
-sleep(1.5)
-
--- 4. TESTE DE EMPUXO TOTAL
-print("--- [4/4] TESTE DE EMPUXO MÁXIMO (3 SEGUNDOS) ---")
-log("💥 LIGANDO OS 4 MOTORES A 100% DE POTÊNCIA...")
-aplicarDiferencial(15, 0, 0)
-for i = 3, 1, -1 do
-    print("   Contagem regressiva de empuxo: " .. i .. "s")
-    sleep(1)
-end
-aplicarDiferencial(0, 0, 0)
-log("Motores desligados. Temperatura estabilizada.")
-print()
-
 print("========================================")
-print("  ✅ BATERIA DE TESTES CONCLUÍDA COM SUCESSO!")
-print("  O míssil está pronto para lançamento.")
+print("  ✅ BATERIA DE TESTES CONCLUÍDA!")
 print("========================================")
