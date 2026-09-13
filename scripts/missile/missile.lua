@@ -117,6 +117,7 @@ local function menu(titulo, opcoes, info)
       end
       y = y + 1
     end
+    local inicioOpcoes = y
     local visiveis = math.max(1, H - y)
     local topo = 1
     if sel > visiveis then topo = sel - visiveis + 1 end
@@ -131,21 +132,24 @@ local function menu(titulo, opcoes, info)
       end
       y = y + 1
     end
-    rodape("SETAS/NUMERO escolhe  ENTER ok  BACKSPACE volta")
-    local ev, p = os.pullEvent()
+    rodape("SETAS/NUMERO/TOQUE escolhe  ENTER ok  BACKSPACE volta")
+    local ev, p1, p2, p3 = os.pullEvent()
     if ev == "key" then
-      if p == keys.up then
+      if p1 == keys.up then
         sel = sel > 1 and sel - 1 or #opcoes
-      elseif p == keys.down then
+      elseif p1 == keys.down then
         sel = sel < #opcoes and sel + 1 or 1
-      elseif p == keys.enter then
+      elseif p1 == keys.enter then
         return sel
-      elseif p == keys.backspace then
+      elseif p1 == keys.backspace then
         return nil
       end
     elseif ev == "char" then
-      local n = tonumber(p)
+      local n = tonumber(p1)
       if n and n >= 1 and n <= #opcoes then return n end
+    elseif ev == "monitor_touch" then
+      local n = math.floor(p3 - inicioOpcoes) + 1
+      if n >= 1 and n <= #opcoes then return n end
     end
   end
 end
