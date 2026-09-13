@@ -64,9 +64,11 @@ local function instalarMissil()
     download("config.lua", "config.lua")
     download("missile/startup.lua", "startup.lua")
     download("missile/missile.lua", "missile.lua")
+    download("missile/teste.lua", "teste.lua")
     print()
     print("Instalacao do Missil Concluida!")
-    print("Digite 'reboot' para iniciar o sistema.")
+    print("Para testar os motores e vetores, digite: teste")
+    print("Para iniciar o sistema completo, digite: reboot")
 end
 
 local function instalarEstacao()

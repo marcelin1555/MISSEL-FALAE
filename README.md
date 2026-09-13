@@ -21,7 +21,13 @@ wget run https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/script
 wget https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/config.lua config.lua
 wget https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/missile/startup.lua startup.lua
 wget https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/missile/missile.lua missile.lua
-reboot
+wget https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/missile/teste.lua teste.lua
+```
+
+⚡ **Para rodar a bateria de testes dos motores 2x2 e vetores:**
+No terminal do computador do míssil, digite:
+```bash
+teste
 ```
 
 ---
