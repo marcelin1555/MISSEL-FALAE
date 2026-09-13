@@ -253,7 +253,7 @@ local function procurar()
   local ops = {}
   for _, a in ipairs(achados) do
     table.insert(ops, ("%-22s %s"):format(a.st.nome or ("#" .. a.id),
-      a.st.pronto and "PRONTO" or "NAO PRONTO"))
+      a.st.emVoo and "EM VOO" or (a.st.pronto and "PRONTO" or "NAO PRONTO")))
   end
   table.insert(ops, "Voltar")
   local i = menu("SELECIONAR MISSIL", ops)
