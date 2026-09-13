@@ -1,0 +1,40 @@
+BLOCKFORGE MILITAR - VERSOES
+============================
+
+Cada pasta tem os 4 programas completos daquela versao.
+Para voltar a uma versao: copie os arquivos da pasta para o computador
+do jogo (ou use o instalar.lua daquela pasta: "instalar missil").
+
+As versoes tambem estao como tags no git (GitTeste/MISSEL-FALAE):
+  git checkout v3.1 -- .      (volta os arquivos para a v3.1)
+  git checkout HEAD -- .      (volta para a ultima versao commitada)
+
+
+v3.0-original
+-------------
+Versao antes das mudancas do Claude.
+- Estabilizacao PD pelo gimbal, navegacao por GPS (torres).
+
+v3.1-freio-giro
+---------------
+- Posicao pela API sublevel (CC: Sable) com o missil montado; GPS como reserva.
+- Freio de giro com os 4 vector thrusters (menu "Calibrar giro").
+- Rumo pela velocidade angular do sublevel (nao se perde quando gira).
+- Testes do freio: catavento no "Controle manual do bocal" (Q/E) e
+  sentido automatico no "Teste de estabilizacao".
+- Correcoes: ajustes inteiros, cor de abortado, codigo oculto,
+  status completo em voo, "EM VOO" na base.
+Problema conhecido: controle a no maximo ~4 Hz, missil balanca.
+
+v3.2-pid-20hz
+-------------
+- Loop de controle a ate 20 Hz: leitura do gimbal, do giro e os 4 setVector
+  saem juntos no mesmo tick (parallel.waitForAll).
+- PID: novo ajuste "KI corrige desvio fixo" (comeca em 0 = igual ao PD antigo).
+  Integral limitada a 30% do bocal e congelada com o bocal no limite.
+- Velocidade de inclinacao filtrada (menos ruido no KD).
+- "Rapidez da inclinacao" (padrao 15 graus/s): a navegacao nao muda a
+  inclinacao pedida de uma vez.
+- Telemetria le os motores so a cada 2 s (nao rouba tempo do controle).
+- Tela de voo mostra "I" (quanto o integral esta corrigindo em X e Y).
+Base e torres de GPS: iguais a v3.1.
