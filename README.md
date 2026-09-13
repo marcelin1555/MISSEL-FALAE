@@ -1,131 +1,76 @@
-# 🚀 Míssil Teleguiado - CC:Tweaked + Create Propulsion + Aeronautics
+# BlockForge Militar — Controlador standalone
 
-Sistema de míssil teleguiado para **Minecraft 1.21.1** com NeoForge, usando computadores CC:Tweaked para controle de voo e comunicação wireless.
+Controlador Lua para Minecraft 1.21.1 com CC:Tweaked, Create Aeronautics e Create Propulsion: Simulated. O projeto usa como implementação principal o código BlockForge Militar fornecido pelo usuário, versão 2.0.
 
----
+## Instalação no computador do veículo
 
-## ⚡ Instalação Rápida no jogo (CC:Tweaked)
+No terminal do computador CC:Tweaked, execute:
 
-Você pode instalar o sistema diretamente no computador dentro do Minecraft executando os comandos abaixo no terminal do CC:Tweaked (é necessário que a API HTTP esteja ativada no mod).
-
-### 🚀 1. No Computador do Míssil
-
-Abra o terminal do computador que ficará no míssil e digite:
-
-```bash
+```text
 wget run https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/installer.lua missil
 ```
 
-*(Ou via comandos manuais se preferir:)*
-```bash
-wget https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/config.lua config.lua
-wget https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/missile/startup.lua startup.lua
-wget https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/missile/missile.lua missile.lua
-wget https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/missile/teste.lua teste.lua
-```
+O instalador baixa `missil.lua` e `startup.lua`. Depois, execute:
 
-⚡ **Para rodar a bateria de testes dos motores 2x2 e vetores:**
-No terminal do computador do míssil, digite:
-```bash
-teste
-```
-
----
-
-### 🕹️ 2. No Computador da Estação de Controle
-
-Abra o terminal do computador/monitor que controlará o míssil e digite:
-
-```bash
-wget run https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/installer.lua estacao
-```
-
-*(Ou via comandos manuais se preferir:)*
-```bash
-wget https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/config.lua config.lua
-wget https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/estacao/startup.lua startup.lua
-wget https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/estacao/estacao.lua estacao.lua
+```text
 reboot
 ```
 
----
+Para iniciar manualmente sem reiniciar:
 
-### 📂 3. Instalação Offline / Manual (Pasta do Save)
-
-Se você não tiver acesso à internet no computador do mod, copie os arquivos baixados deste repositório diretamente para a pasta do mundo:
-`saves/<seu-mundo>/computercraft/computer/<ID_DO_COMPUTADOR>/`
-
-- **Computador do Míssil:** `config.lua`, `scripts/missile/startup.lua` (renomeado para `startup.lua`), `scripts/missile/missile.lua`
-- **Computador da Estação:** `config.lua`, `scripts/estacao/startup.lua` (renomeado para `startup.lua`), `scripts/estacao/estacao.lua`
-
----
-
-## 📋 Mods Necessários
-
-- **CC:Tweaked** - Computadores e programação Lua
-- **Create** - Base mecânica
-- **Create Propulsion** - Thrusters vetoriais e tilt adapters
-- **Create Aeronautics** - Propellers e aerodinâmica
-- **Sable** - Motor de física para sub-levels
-- **Create Simulated Additions** - Physics Assembler
-
----
-
-## 📁 Estrutura do Repositório
-
-```
-missil-teleguiado/
-├── scripts/
-│   ├── config.lua              # Configurações compartilhadas
-│   ├── installer.lua           # Instalador automático via GitHub
-│   ├── missile/
-│   │   ├── startup.lua         # Auto-start do míssil
-│   │   └── missile.lua         # Lógica de voo e controle
-│   └── estacao/
-│       ├── startup.lua         # Auto-start da estação
-│       └── estacao.lua         # Interface HUD e controles
-└── guia-montagem/
-    └── README.md               # Guia passo-a-passo de construção
+```text
+missil
 ```
 
----
+O controlador também aceita o modo direto de lançamento previsto no código:
 
-## 🎮 Controles da Estação
+```text
+missil lancar
+```
 
-| Tecla | Ação |
-|-------|------|
-| **W** | Pitch para cima |
-| **S** | Pitch para baixo |
-| **A** | Yaw para esquerda |
-| **D** | Yaw para direita |
-| **Espaço** | Aumentar throttle |
-| **Shift** | Diminuir throttle |
-| **Enter** | Lançar míssil |
-| **F** | Armar ogiva |
-| **X** | Detonar |
-| **M** | Alternar modo (Manual/GPS) |
-| **Backspace** | Autodestruição (emergência) |
-| **Q** | Sair |
+## Instalação da estação
 
----
+A estação continua sendo instalada pelo fluxo existente:
 
-## 🎯 Modos de Guiamento
+```text
+wget run https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/installer.lua estacao
+```
 
-- **Manual (WASD)** — Pilote o míssil em tempo real através da estação de controle.
-- **GPS** — Informe as coordenadas X, Y, Z alvo e o míssil navegará automaticamente.
+## Arquivos principais
 
----
+```text
+scripts/
+├── installer.lua
+├── missile/
+│   ├── missil.lua       # implementação principal BlockForge v2.0
+│   ├── startup.lua      # inicializador
+│   ├── teste.lua        # bateria de testes existente
+│   ├── calibrar.lua
+│   └── calibrar_gimbal.lua
+└── estacao/
+    ├── startup.lua
+    └── estacao.lua
+```
 
-## ⚙️ Configuração (`config.lua`)
+A implementação anterior da interface v3 foi removida do conjunto ativo conforme solicitado. O controlador utilizado agora é somente o código anexado que já está funcionando.
 
-Edite o arquivo `config.lua` para ajustar:
-- Canais de comunicação wireless (`CANAL_ENVIO` e `CANAL_RECEBER`)
-- Ângulos máximos dos tilt adapters (`TILT_MAX_ANGLE`)
-- Lados de redstone para thrusters e detonador
-- Teclas de controle e cores da interface HUD
+## Recursos do controlador
 
----
+O código principal contém menu de terminal, diagnóstico de componentes, calibração do gimbal, calibração do bocal, ajustes de voo, presets, painel de status, controle manual do bocal e rotina de voo com controle PD. Ele detecta gimbal, vector thrusters, motores sólidos, motores líquidos, motores iônicos, motores criativos e drive de disquete pelos tipos de peripheral esperados pelo código.
 
-## 📖 Guia de Montagem
+Antes de executar testes com empuxo, monte o veículo em uma área controlada e confirme os peripherals encontrados pelo painel de status. A bateria `teste` deve ser usada para diagnóstico inicial dos motores e vetores.
 
-Para instruções detalhadas de como construir a estrutura física do míssil e da estação no Minecraft, acesse o [Guia de Montagem](guia-montagem/README.md).
+## Mods esperados
+
+| Modificação | Função |
+|---|---|
+| CC:Tweaked | Computador, Lua e peripherals |
+| Create | Contraptions e componentes mecânicos |
+| Create Aeronautics | Física e componentes aéreos |
+| Create Propulsion: Simulated | Propulsão e vetorização conforme a instalação |
+| Sable | Física dos subníveis |
+| Create Simulated Additions | Physics Assembler e integração do projeto |
+
+## Fonte do código
+
+A implementação principal é o conteúdo fornecido no arquivo anexado pelo usuário e está versionada em `scripts/missile/missil.lua`.

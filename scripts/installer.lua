@@ -1,104 +1,57 @@
--- ============================================
--- MISSIL TELEGUIADO - INSTALADOR AUTOMÁTICO
--- ============================================
--- Instala automaticamente os arquivos do projeto
--- via GitHub no CC:Tweaked.
-
+-- Instalador do controlador BlockForge Militar
 local BASE_URL = "https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/"
-
 local args = { ... }
 
-local function download(urlPath, savePath)
-    print("Baixando: " .. savePath .. "...")
-    if not http then
-        print("  [ERRO] API HTTP nao esta ativada no CC:Tweaked!")
-        return false
-    end
-    local response = http.get(BASE_URL .. urlPath)
-    if response then
-        local content = response.readAll()
-        response.close()
-        local dir = fs.getDir(savePath)
-        if dir and dir ~= "" and not fs.exists(dir) then
-            fs.makeDir(dir)
-        end
-        local file = fs.open(savePath, "w")
-        if file then
-            file.write(content)
-            file.close()
-            print("  [OK] Salvo com sucesso!")
-            return true
-        else
-            print("  [ERRO] Falha ao criar arquivo: " .. savePath)
-        end
-    else
-        print("  [ERRO] Falha na conexao: " .. BASE_URL .. urlPath)
-    end
+local function download(remotePath, localPath)
+  print("Baixando " .. localPath .. "...")
+  if not http then
+    print("ERRO: API HTTP desativada no CC:Tweaked.")
     return false
+  end
+  local response = http.get(BASE_URL .. remotePath)
+  if not response then
+    print("ERRO: falha ao baixar " .. remotePath)
+    return false
+  end
+  local content = response.readAll()
+  response.close()
+  local file = fs.open(localPath, "w")
+  if not file then
+    print("ERRO: nao foi possivel criar " .. localPath)
+    return false
+  end
+  file.write(content)
+  file.close()
+  print("OK: " .. localPath)
+  return true
 end
 
-local function printBanner()
-    term.clear()
-    term.setCursorPos(1, 1)
-    print("================================")
-    print("  INSTALADOR MISSIL TELEGUIADO")
-    print("  v1.0 - GitHub Auto-Installer")
-    print("================================")
-    print()
-end
+term.clear()
+term.setCursorPos(1, 1)
+print("========================================")
+print("  BLOCKFORGE MILITAR - INSTALADOR")
+print("  Controlador standalone v2.0")
+print("========================================")
+print()
 
-local function printUso()
-    print("Uso: installer <tipo>")
-    print()
-    print("Tipos disponiveis:")
-    print("  missil  - Baixa e instala scripts do missil")
-    print("  estacao - Baixa e instala scripts da estacao")
-    print()
-    print("Exemplo:")
-    print("  installer missil")
-end
-
-local function instalarMissil()
-    print("Instalando scripts do MISSIL...")
-    print()
-    download("config.lua", "config.lua")
-    download("missile/startup.lua", "startup.lua")
-    download("missile/missile.lua", "missile.lua")
-    download("missile/teste.lua", "teste.lua")
-    download("missile/calibrar_gimbal.lua", "calibrar_gimbal.lua")
-    download("missile/calibrar.lua", "calibrar.lua")
-    print()
-    print("Instalacao do Missil Concluida!")
-    print("Para calibrar o gimbal, digite: calibrar_gimbal")
-    print("Para calibrar o bocal, digite: calibrar")
-    print("Para testar os motores, digite: teste")
-    print("Para iniciar o sistema de voo, digite: reboot")
-end
-
-local function instalarEstacao()
-    print("Instalando scripts da ESTACAO DE CONTROLE...")
-    print()
-    download("config.lua", "config.lua")
-    download("estacao/startup.lua", "startup.lua")
-    download("estacao/estacao.lua", "estacao.lua")
-    print()
-    print("Instalacao da Estacao Concluida!")
-    print("Digite 'reboot' para iniciar a interface.")
-end
-
-printBanner()
-
-if #args == 0 then
-    printUso()
-    return
-end
-
-local tipo = string.lower(args[1])
+local tipo = string.lower(args[1] or "")
 if tipo == "missil" or tipo == "missile" then
-    instalarMissil()
+  local ok1 = download("missile/missile.lua", "missil.lua")
+  local ok2 = download("missile/startup.lua", "startup.lua")
+  print()
+  if ok1 and ok2 then
+    print("Instalacao concluida.")
+    print("Execute: missil")
+    print("Ou reinicie com: reboot")
+  else
+    print("Instalacao incompleta.")
+  end
 elseif tipo == "estacao" or tipo == "station" then
-    instalarEstacao()
+  print("A estacao ainda usa os arquivos existentes do projeto.")
+  download("config.lua", "config.lua")
+  download("estacao/startup.lua", "startup.lua")
+  download("estacao/estacao.lua", "estacao.lua")
 else
-    print("Tipo invalido: " .. tipo)
-    printUso()
+  print("Uso: installer missil")
+  print("O modo missil instala apenas o codigo BlockForge anexado.")
 end
