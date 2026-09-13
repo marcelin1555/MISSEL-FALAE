@@ -1136,12 +1136,13 @@ local function principal()
       "Calibrar bocal",
       "Ajustes de voo",
       "Presets (disquete)",
+      "Modo remoto / estacao",
       "Testar componentes",
       "Sair",
     }, info)
 
-    local acoes = { voo, calibrarGimbal, calibrarBocal, ajustes, presets, testes }
-    if not i or i == 7 then return end
+    local acoes = { voo, calibrarGimbal, calibrarBocal, ajustes, presets, modoRemoto, testes }
+    if not i or i == 8 then return end
 
     local ok, err = pcall(acoes[i])
     detectar()
