@@ -20,26 +20,130 @@ Guia passo-a-passo para construir o míssil e a estação de controle no Minecra
 | 1x | TNT ou Shell explosiva (opcional, ogiva) | Vanilla/CBC |
 | 1x | Honey Glue (opcional, para manter junto) | Create Simulated |
 
+### Diagrama de Arquitetura do Míssil (Mermaid)
+
+```mermaid
+graph TD
+    subgraph "🚀 Míssil Teleguiado (Sub-Level Create Aeronautics)"
+        OGIVA["💥 Ogiva / TNT<br/>(Lado Top Redstone)"]
+        COMP["🖥️ CC:Tweaked Advanced Computer<br/>(Cérebro com missile.lua)"]
+        MODEM["📡 Ender Modem / Wireless<br/>(Canal 42 / 43)"]
+        
+        subgraph "Propulsão e Vetorização"
+            TILT_ADV["🔄 Advanced Tilt Adapter<br/>(Pitch + Yaw simultâneo)"]
+            TILT_NORM1["↕️ Tilt Adapter 1 (Pitch)"]
+            TILT_NORM2["↔️ Tilt Adapter 2 (Yaw)"]
+            THRUSTER["🔥 Vector Thruster<br/>(Lado Back Redstone)"]
+        end
+        
+        BOOSTER["🚀 Solid Fuel Thruster<br/>(Booster Inicial - Opcional)"]
+    end
+
+    COMP -->|Sinal Redstone 'top'| OGIVA
+    COMP --- MODEM
+    COMP -->|Sinal Redstone 'back'| THRUSTER
+    COMP -.->|Periférico Lua| TILT_ADV
+    COMP -.->|Periféricos Lua| TILT_NORM1
+    COMP -.->|Periféricos Lua| TILT_NORM2
+    TILT_ADV --- THRUSTER
+    TILT_NORM1 --- TILT_NORM2 --- THRUSTER
+```
+
+---
+
+### Esquema Visual de Bloco a Bloco (ASCII)
+
+#### 📌 Opção 1: Montagem com Advanced Tilt Adapter (Recomendado)
+
+```text
+       [ TETO / FRENTE DO MÍSSIL ]
+                 |
+         +---------------+
+         |   💥 OGIVA    |  ← TNT / Explosivo (Conectado ao topo do computador)
+         +---------------+
+                 | (Lado TOP - Redstone para detonar)
+         +---------------+
+         |  🖥️ COMPUTER  |  ← CC:Tweaked Advanced Computer (roda missile.lua)
+         |  📡 [MODEM]   |  ← Ender Modem em uma das laterais (Luz vermelha ACESA)
+         +---------------+
+                 | (Lado BACK - Redstone para acelerador)
+         +---------------+
+         | 🔄 ADVANCED   |  ← Advanced Tilt Adapter (Controla Pitch e Yaw)
+         |  TILT ADAPTER |
+         +---------------+
+                 |
+         +---------------+
+         | 🔥 VECTOR     |  ← Vector Thruster (Aparato de exaustão apontado para trás)
+         |   THRUSTER    |
+         +---------------+
+                 |
+       [ FOGO / SAÍDA DE EXAUSTÃO ]
+```
+
+---
+
+#### 📌 Opção 2: Montagem com 2 Tilt Adapters Normais
+
+```text
+       [ TETO / FRENTE DO MÍSSIL ]
+                 |
+         +---------------+
+         |   💥 OGIVA    |  ← TNT / Carga Explosiva
+         +---------------+
+                 | (Lado TOP Redstone)
+         +---------------+
+         |  🖥️ COMPUTER  |  ← CC:Tweaked Advanced Computer
+         |  📡 [MODEM]   |  ← Ender Modem ativo
+         +---------------+
+                 | (Lado BACK Redstone)
+         +---------------+
+         | ↕️ TILT 1     |  ← Tilt Adapter Normal (Configurado/Alocado para PITCH)
+         +---------------+
+                 |
+         +---------------+
+         | ↔️ TILT 2     |  ← Tilt Adapter Normal (Configurado/Alocado para YAW)
+         +---------------+
+                 |
+         +---------------+
+         | 🔥 VECTOR     |  ← Vector Thruster
+         |   THRUSTER    |
+         +---------------+
+                 |
+       [ FOGO / SAÍDA DE EXAUSTÃO ]
+```
+
+---
+
+#### 📌 Esquema de Montagem da Estação de Controle (HUD)
+
+```text
+   +-------------------------------------------------------+
+   |             PAINEL DE MONITORES 3x2                   |
+   |  +-----------------+-----------------+-------------+  |
+   |  |  TELEMETRIA     |   BÚSSOLA / YAW |  STATUS GO  |  |
+   |  +-----------------+-----------------+-------------+  |
+   |  |  ALTITUDE / VEL |   PITCH / ROLL  |  OGIVA ARM  |  |
+   |  +-----------------+-----------------+-------------+  |
+   +-------------------------------------------------------+
+                              |
+                     +-----------------+
+                     | 🖥️ COMPUTER (PC) |  ← Roda estacao.lua
+                     | 📡 [ENDER MODEM]|  ← Comunicação Wireless
+                     +-----------------+
+```
+
+---
+
 ### Passo a Passo
 
 #### 1. Base do Míssil (corpo)
 
-**Opção A: Usando Advanced Tilt Adapter (Recomendado - 1 único bloco)**
-```
-   [TNT]                   ← Ogiva (topo) - conectada ao lado "top" do computador
-   [COMPUTADOR]            ← Computador Advanced com modem na lateral
-   [ADVANCED TILT ADAPTER] ← Controla Pitch + Yaw simultaneamente em 2 eixos
-   [VECTOR THRUSTER]       ← Vector Thruster principal (atrás)
-```
-
-**Opção B: Usando Tilt Adapters Normais (2 blocos - 1 eixo por bloco)**
-```
-   [TNT]                   ← Ogiva (topo)
-   [COMPUTADOR]            ← Computador Advanced
-   [TILT ADAPTER 1]        ← Tilt Adapter para PITCH
-   [TILT ADAPTER 2]        ← Tilt Adapter para YAW
-   [VECTOR THRUSTER]       ← Vector Thruster principal
-```
+1. Coloque os blocos no chão na vertical ou horizontal (conforme desejar montar).
+2. O **Advanced Computer** deve estar no meio.
+3. Coloque a **TNT / Ogiva** colada na face superior (`top`) do computador.
+4. Coloque o **Tilt Adapter** (Normal ou Advanced) colado na face traseira (`back`) do computador.
+5. Coloque o **Vector Thruster** atrás do Tilt Adapter (bocal do foguete virado para trás).
+6. Coloque o **Ender Modem** em uma das laterais livres do computador e **clique com o botão direito** nele para ligar (deve emitir luz/partículas).
 
 #### 2. Conectando o Computador
 1. Coloque o **Advanced Computer** no centro do míssil
