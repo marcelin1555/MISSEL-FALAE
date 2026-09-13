@@ -36,7 +36,7 @@ print()
 
 local tipo = string.lower(args[1] or "")
 if tipo == "missil" or tipo == "missile" then
-  local ok1 = download("missile/missile.lua", "missil.lua")
+  local ok1 = download("missile/missil.lua", "missil.lua")
   local ok2 = download("missile/startup.lua", "startup.lua")
   print()
   if ok1 and ok2 then
