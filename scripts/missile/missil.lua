@@ -4,6 +4,7 @@
 --      missil lancar     (vai direto para o lancamento)
 
 local VERSAO = "2.0"
+local argumentos = { ... }
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local LIMIAR = 3 -- inclinacao minima (graus) aceita nas calibracoes
@@ -11,7 +12,6 @@ local RADIO_PROTOCOLO = "BFM_REMOTE_1"
 local RADIO_COMANDO = 4210
 local RADIO_TELEMETRIA = 4211
 local RADIO_TIMEOUT = 3
-local modoRemoto = false
 local radio = nil
 
 ---------------------------------------------------------------- TELA
@@ -1157,8 +1157,8 @@ end
 
 carregarConfig()
 local ok, err = pcall(function()
-  if arg[1] == "lancar" then voo()
-  elseif arg[1] == "remoto" then modoRemoto()
+  if argumentos[1] == "lancar" then voo()
+  elseif argumentos[1] == "remoto" then modoRemoto()
   else principal() end
 end)
 pcall(detectar)
