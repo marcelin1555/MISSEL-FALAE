@@ -36,6 +36,13 @@ config.THRUSTER_BR_NAME = nil -- ex: "vector_thruster_3"
 config.THRUSTER_SIDE    = "back" -- Lado do sinal de empuxo mestre (fallback)
 config.DETONACAO_SIDE   = "top"  -- Lado que ativa a detonação (TNT/Ogiva)
 
+-- === ESTABILIZAÇÃO & GIMBAL (Aeronautics / Gyroscope / IMU) ===
+config.USAR_GIMBAL      = true  -- Auto-detectar Gimbal do Aeronautics para estabilização PID
+config.PID_KP           = 0.5   -- Ganho Proporcional (força da correção)
+config.PID_KI           = 0.02  -- Ganho Integral (elimina erro acumulado)
+config.PID_KD           = 0.1   -- Ganho Derivativo (suaviza oscilações)
+config.ESTABILIZAR_ROLL = true  -- Evita que o míssil gire em torno de si mesmo (Roll lock)
+
 -- === CONTROLE DE VOO ===
 config.THROTTLE_MIN     = 0    -- nível mínimo de redstone (0-15)
 config.THROTTLE_MAX     = 15   -- nível máximo de redstone
