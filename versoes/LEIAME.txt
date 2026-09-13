@@ -38,3 +38,17 @@ v3.2-pid-20hz
 - Telemetria le os motores so a cada 2 s (nao rouba tempo do controle).
 - Tela de voo mostra "I" (quanto o integral esta corrigindo em X e Y).
 Base e torres de GPS: iguais a v3.1.
+Problema conhecido: altura sem controle num missil so com vector thrusters
+e solidos (cai no cruzeiro, nao mergulha no ataque).
+
+v3.3-altura
+-----------
+- Altura controlada pelo empuxo dos vector thrusters (antes so motores
+  liquidos comuns, que este missil nao tem).
+- Novo ajuste "Empuxo min do vetor" (padrao 0.3): o empuxo nunca cai abaixo
+  disso, para os bocais continuarem segurando o missil reto.
+  "Empuxo max do vetor" e o antigo "Empuxo do vetor".
+- Prioridade para a altura: empuxo no maximo e afundando -> reduz a
+  inclinacao maxima (ate 25%). Na tela, "acel" fica vermelho quando isso acontece.
+- Sem tranco no empuxo na passagem da DECOLAGEM para a SUBIDA.
+Base e torres de GPS: iguais a v3.1.
