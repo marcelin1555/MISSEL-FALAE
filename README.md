@@ -28,13 +28,31 @@ O controlador também aceita o modo direto de lançamento previsto no código:
 missil lancar
 ```
 
-## Instalação da estação
+## Instalação da estação nova
 
-A estação continua sendo instalada pelo fluxo existente:
+A estação foi refeita do zero, sem reutilizar o código legado. Ela usa um protocolo próprio com modem wireless, HUD em monitor ou terminal, ping, telemetria, lançamento remoto e abortar remoto:
 
 ```text
 wget run https://raw.githubusercontent.com/marcelin1555/MISSEL-FALAE/main/scripts/installer.lua estacao
 ```
+
+No computador do veículo, inicie o modo remoto do controlador funcional:
+
+```text
+missil remoto
+```
+
+Na estação, os controles são:
+
+| Tecla | Ação |
+|---|---|
+| `P` | Ping/reconectar |
+| `L` | Solicitar lançamento |
+| `X` | Solicitar abortar |
+| `R` | Reconectar |
+| `Q` | Encerrar estação |
+
+O protocolo usa os canais `4210` para comandos e `4211` para telemetria, com identificador `BFM_REMOTE_1`.
 
 ## Arquivos principais
 
@@ -48,8 +66,8 @@ scripts/
 │   ├── calibrar.lua
 │   └── calibrar_gimbal.lua
 └── estacao/
-    ├── startup.lua
-    └── estacao.lua
+    ├── startup.lua      # inicializador da estação nova
+    └── estacao.lua      # estação BlockForge Remote v1, feita do zero
 ```
 
 A implementação anterior da interface v3 foi removida do conjunto ativo conforme solicitado. O controlador utilizado agora é somente o código anexado que já está funcionando.

@@ -1,495 +1,179 @@
--- ============================================
--- MISSIL TELEGUIADO - ESTAÇÃO DE CONTROLE
--- CC:Tweaked + Monitor + Wireless Modem
--- ============================================
--- Este script roda no computador da ESTAÇÃO,
--- mostrando telemetria no monitor e recebendo
--- comandos do jogador via teclado.
--- ============================================
+-- Estacao BlockForge Remote v1
+-- Implementacao nova, sem dependencia da antiga estacao.lua.
+-- Protocolo: BFM_REMOTE_1 / canais 4210 comando e 4211 telemetria.
 
-local config = require("config")
-
--- ======== ESTADO DA ESTAÇÃO ========
-local estacao = {
-    conectado      = false,
-    ultimo_ping    = 0,
-    telemetria     = nil,
-    modo           = config.MODO_PADRAO,
-    alvo_x         = nil,
-    alvo_y         = nil,
-    alvo_z         = nil,
-    input_ativo    = false,
-    input_campo    = "",
-    input_buffer   = "",
-    rodando        = true,
-    throttle_cmd   = config.THROTTLE_INICIAL,
-    pitch_cmd      = 0,
-    yaw_cmd        = 0,
+local PROTOCOLO = "BFM_REMOTE_1"
+local CANAL_COMANDO = 4210
+local CANAL_TELEMETRIA = 4211
+local TIMEOUT = 3
+local modem
+local monitor
+local tela
+local estado = {
+  link = false,
+  status = "desconectado",
+  ultima = 0,
+  norte = 0,
+  leste = 0,
+  giro = 0,
+  bocalX = 0,
+  bocalY = 0,
+  empuxo = 0,
+  hz = 0,
+  tempo = 0,
+  anguloMaximo = 0,
+  mensagem = "Iniciando estação",
 }
 
--- ======== PERIFÉRICOS ========
-local modem = nil
-local monitor = nil
-
--- ======== FUNÇÕES AUXILIARES ========
-
-local function log(msg)
-    local timestamp = string.format("[%.1f]", os.clock())
-    -- Imprime no terminal do computador, não no monitor
-    local old = term.redirect(term.native())
-    print(timestamp .. " " .. msg)
-    if old then term.redirect(old) end
-end
-
 local function encontrarModem()
-    local modems = { peripheral.find("modem") }
-    for _, m in ipairs(modems) do
-        if m.isWireless and m.isWireless() then
-            return m
-        end
+  for _, nome in ipairs(peripheral.getNames()) do
+    if peripheral.hasType(nome, "modem") then
+      local p = peripheral.wrap(nome)
+      if p and p.isWireless and p.isWireless() then return p end
     end
-    if #modems > 0 then return modems[1] end
-    return nil
+  end
 end
 
-local function encontrarMonitor()
-    return peripheral.find("monitor")
+local function enviar(acao, dados)
+  if not modem then return end
+  local pacote = { protocolo = PROTOCOLO, tipo = "comando", dados = dados or { acao = acao } }
+  pacote.dados.acao = acao
+  modem.transmit(CANAL_COMANDO, CANAL_TELEMETRIA, textutils.serialize(pacote))
 end
 
--- ======== COMUNICAÇÃO ========
+local function cor(c)
+  if tela and tela.isColor and tela.isColor() then tela.setTextColor(c) end
+end
 
-local function enviarComando(acao, extras)
-    if not modem then return end
-    
-    local cmd = {
-        tipo = "comando",
-        protocolo = config.PROTOCOLO,
-        acao = acao,
-    }
-    
-    if extras then
-        for k, v in pairs(extras) do
-            cmd[k] = v
-        end
+local function fundo(c)
+  if tela and tela.isColor and tela.isColor() then tela.setBackgroundColor(c) end
+end
+
+local function limpar()
+  fundo(colors.black)
+  cor(colors.white)
+  tela.clear()
+  tela.setCursorPos(1, 1)
+end
+
+local function texto(x, y, valor, color)
+  if y < 1 then return end
+  valor = tostring(valor or "")
+  local w = select(1, tela.getSize())
+  if #valor > w - x + 1 then valor = valor:sub(1, math.max(0, w - x + 1)) end
+  tela.setCursorPos(x, y)
+  cor(color or colors.white)
+  tela.write(valor)
+end
+
+local function barra(y, valor, maximo, largura)
+  local w = select(1, tela.getSize())
+  largura = math.min(largura or 20, math.max(1, w - 4))
+  local preenchido = math.floor(math.max(0, math.min(1, valor / maximo)) * largura)
+  tela.setCursorPos(2, y)
+  fundo(colors.gray)
+  tela.write(string.rep(" ", largura))
+  tela.setCursorPos(2, y)
+  fundo(valor > maximo * 0.8 and colors.orange or colors.lime)
+  tela.write(string.rep(" ", preenchido))
+  fundo(colors.black)
+end
+
+local function desenhar()
+  if not tela then return end
+  local w, h = tela.getSize()
+  limpar()
+  fundo(colors.gray)
+  cor(colors.yellow)
+  tela.setCursorPos(1, 1)
+  tela.clearLine()
+  tela.write(" BLOCKFORGE REMOTE v1")
+  cor(colors.white)
+  fundo(colors.black)
+  texto(2, 3, "LINK: " .. (estado.link and "CONECTADO" or "DESCONECTADO"), estado.link and colors.lime or colors.red)
+  texto(2, 4, "STATUS: " .. string.upper(estado.status), estado.status == "voo" and colors.orange or colors.cyan)
+  texto(2, 6, string.format("NORTE %8.2f", estado.norte), colors.white)
+  texto(2, 7, string.format("LESTE %8.2f", estado.leste), colors.white)
+  texto(2, 8, string.format("GIRO  %8.2f", estado.giro), colors.white)
+  texto(2, 10, string.format("BOCAL X %7.2f", estado.bocalX), colors.lightBlue)
+  texto(2, 11, string.format("BOCAL Y %7.2f", estado.bocalY), colors.lightBlue)
+  texto(2, 13, string.format("EMPuxo %.2f kN", estado.empuxo), colors.orange)
+  texto(2, 14, string.format("CONTROLE %.1f Hz", estado.hz), colors.white)
+  texto(2, 15, string.format("TEMPO %.1f s", estado.tempo), colors.white)
+  texto(2, 16, string.format("ANGULO MAX %.1f", estado.anguloMaximo), estado.anguloMaximo > 30 and colors.red or colors.white)
+  barra(18, estado.empuxo, math.max(1, estado.empuxo), math.min(30, w - 4))
+  texto(2, math.max(20, h - 5), "P ping   L lançar   X abortar", colors.lightGray)
+  texto(2, math.max(21, h - 4), "R reconectar   Q sair", colors.lightGray)
+  texto(2, math.max(23, h - 2), estado.mensagem, colors.yellow)
+end
+
+local function processar(pacote)
+  if type(pacote) ~= "table" or pacote.protocolo ~= PROTOCOLO then return end
+  estado.link = true
+  estado.ultima = os.clock()
+  local dados = pacote.dados or {}
+  estado.status = dados.status or pacote.tipo or estado.status
+  estado.mensagem = "Recebido: " .. tostring(pacote.tipo)
+  for _, chave in ipairs({"norte", "leste", "giro", "bocalX", "bocalY", "empuxo", "hz", "tempo", "anguloMaximo"}) do
+    if dados[chave] ~= nil then estado[chave] = tonumber(dados[chave]) or estado[chave] end
+  end
+end
+
+local function receber()
+  while true do
+    local event, _, canal, _, mensagem = os.pullEvent("modem_message")
+    if canal == CANAL_TELEMETRIA then
+      local ok, pacote = pcall(textutils.unserialize, mensagem)
+      if ok then processar(pacote) end
     end
-    
-    modem.transmit(config.CANAL_ENVIO, config.CANAL_RECEBER, textutils.serialise(cmd))
+  end
 end
 
-local function ping()
-    enviarComando("ping")
-end
-
--- ======== DESENHO DO MONITOR ========
-
-local mon -- referência ao monitor para drawing
-
-local function monClear()
-    mon.setBackgroundColor(config.COR_FUNDO)
-    mon.clear()
-end
-
-local function monEscrever(x, y, texto, cor_texto, cor_fundo)
-    mon.setCursorPos(x, y)
-    if cor_texto then mon.setTextColor(cor_texto) end
-    if cor_fundo then mon.setBackgroundColor(cor_fundo) end
-    mon.write(texto)
-    -- Reset
-    mon.setTextColor(config.COR_TEXTO)
-    mon.setBackgroundColor(config.COR_FUNDO)
-end
-
-local function monLinha(y, char)
-    local w, _ = mon.getSize()
-    mon.setCursorPos(1, y)
-    mon.setTextColor(colors.gray)
-    mon.write(string.rep(char or "-", w))
-    mon.setTextColor(config.COR_TEXTO)
-end
-
-local function monBarraProgresso(x, y, largura, valor, max, cor)
-    local preenchido = math.floor((valor / max) * largura)
-    mon.setCursorPos(x, y)
-    
-    for i = 1, largura do
-        if i <= preenchido then
-            mon.setBackgroundColor(cor or config.COR_BARRA)
-            mon.write(" ")
-        else
-            mon.setBackgroundColor(colors.gray)
-            mon.write(" ")
-        end
-    end
-    
-    mon.setBackgroundColor(config.COR_FUNDO)
-end
-
-local function desenharHUD()
-    if not mon then return end
-    
-    local w, h = mon.getSize()
-    monClear()
-    
-    -- ======== TÍTULO ========
-    local titulo = " MISSIL TELEGUIADO v1.0 "
-    local titulo_x = math.floor((w - #titulo) / 2) + 1
-    monEscrever(titulo_x, 1, titulo, colors.black, config.COR_TITULO)
-    
-    -- ======== STATUS DE CONEXÃO ========
-    local status_con = estacao.conectado and "CONECTADO" or "DESCONECTADO"
-    local cor_con = estacao.conectado and config.COR_OK or config.COR_ALERTA
-    monEscrever(2, 2, "Link: ", config.COR_INFO)
-    monEscrever(8, 2, status_con, cor_con)
-    
-    monLinha(3, "=")
-    
-    local tel = estacao.telemetria
-    
-    if tel then
-        -- ======== STATUS DO MÍSSIL ========
-        local status_texto = string.upper(tel.status or "???")
-        local cor_status = config.COR_TEXTO
-        if tel.status == "idle" then cor_status = colors.lightGray
-        elseif tel.status == "lancado" then cor_status = config.COR_OK
-        elseif tel.status == "armado" then cor_status = config.COR_BARRA
-        elseif tel.status == "detonado" then cor_status = config.COR_ALERTA
-        elseif tel.status == "destruido" then cor_status = colors.red
-        end
-        
-        monEscrever(2, 4, "Status:", config.COR_INFO)
-        monEscrever(10, 4, status_texto, cor_status)
-        
-        -- Modo
-        local modo_texto = string.upper(tel.modo or "???")
-        monEscrever(2, 5, "Modo:  ", config.COR_INFO)
-        monEscrever(10, 5, modo_texto, config.COR_TITULO)
-        
-        -- Armado
-        local arm_texto = tel.armado and "SIM" or "NAO"
-        local arm_cor = tel.armado and config.COR_ALERTA or colors.lightGray
-        monEscrever(2, 6, "Armado:", config.COR_INFO)
-        monEscrever(10, 6, arm_texto, arm_cor)
-        
-        monLinha(7, "-")
-        
-        -- ======== TELEMETRIA DE VOO ========
-        monEscrever(2, 8, "TELEMETRIA DE VOO", config.COR_TITULO)
-        
-        -- Throttle
-        monEscrever(2, 9, "Throttle:", config.COR_INFO)
-        local throttle_pct = math.floor((tel.throttle / config.THROTTLE_MAX) * 100)
-        monEscrever(12, 9, string.format("%d%%", throttle_pct))
-        monBarraProgresso(18, 9, math.min(12, w - 19), tel.throttle, config.THROTTLE_MAX, 
-            throttle_pct > 80 and config.COR_ALERTA or config.COR_OK)
-        
-        -- Pitch / Yaw
-        monEscrever(2, 10, "Pitch:", config.COR_INFO)
-        monEscrever(10, 10, string.format("%+.1f", tel.pitch or 0) .. "°")
-        
-        monEscrever(2, 11, "Yaw:  ", config.COR_INFO)
-        monEscrever(10, 11, string.format("%+.1f", tel.yaw or 0) .. "°")
-        
-        -- Combustível
-        monEscrever(2, 12, "Fuel: ", config.COR_INFO)
-        local fuel = tel.combustivel or 0
-        local fuel_cor = fuel > 50 and config.COR_OK or (fuel > 20 and config.COR_BARRA or config.COR_ALERTA)
-        monEscrever(10, 12, string.format("%.0f%%", fuel))
-        monBarraProgresso(18, 12, math.min(12, w - 19), fuel, 100, fuel_cor)
-        
-        -- Tempo de voo
-        monEscrever(2, 13, "Tempo:", config.COR_INFO)
-        monEscrever(10, 13, string.format("%.1fs", tel.tempo_voo or 0))
-        
-        monLinha(14, "-")
-        
-        -- ======== POSIÇÃO GPS ========
-        monEscrever(2, 15, "POSICAO GPS", config.COR_TITULO)
-        
-        monEscrever(2, 16, "X:", config.COR_INFO)
-        monEscrever(5, 16, string.format("%.1f", tel.pos_x or 0))
-        
-        monEscrever(2, 17, "Y:", config.COR_INFO)
-        monEscrever(5, 17, string.format("%.1f", tel.pos_y or 0))
-        
-        monEscrever(2, 18, "Z:", config.COR_INFO)
-        monEscrever(5, 18, string.format("%.1f", tel.pos_z or 0))
-        
-        -- Velocidade
-        if tel.vel_x then
-            local vel = math.sqrt((tel.vel_x or 0)^2 + (tel.vel_y or 0)^2 + (tel.vel_z or 0)^2)
-            monEscrever(16, 16, "Vel:", config.COR_INFO)
-            monEscrever(21, 16, string.format("%.1f m/s", vel * 20)) -- blocos/tick -> m/s
-        end
-        
-        -- Alvo (se modo GPS)
-        if estacao.alvo_x then
-            monLinha(19, "-")
-            monEscrever(2, 20, "ALVO", config.COR_TITULO)
-            monEscrever(2, 21, string.format("X:%.0f Y:%.0f Z:%.0f",
-                estacao.alvo_x, estacao.alvo_y, estacao.alvo_z), config.COR_BARRA)
-            
-            -- Distância até o alvo
-            if tel.pos_x and estacao.alvo_x then
-                local dx = estacao.alvo_x - tel.pos_x
-                local dy = estacao.alvo_y - tel.pos_y
-                local dz = estacao.alvo_z - tel.pos_z
-                local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-                monEscrever(2, 22, "Dist: ", config.COR_INFO)
-                monEscrever(8, 22, string.format("%.1f blocos", dist),
-                    dist < 10 and config.COR_ALERTA or config.COR_TEXTO)
-            end
-        end
-        
-    else
-        -- Sem telemetria
-        monEscrever(2, 5, "Aguardando telemetria...", colors.lightGray)
-        monEscrever(2, 7, "Verifique se o missil esta", colors.lightGray)
-        monEscrever(2, 8, "ligado e com modem ativo.", colors.lightGray)
-    end
-    
-    -- ======== CONTROLES (rodapé) ========
-    local footer_y = math.max(h - 4, 23)
-    monLinha(footer_y, "=")
-    monEscrever(2, footer_y + 1, "CONTROLES", config.COR_TITULO)
-    monEscrever(2, footer_y + 2, "WASD:Direcao SPACE/SHIFT:Pot", colors.lightGray)
-    monEscrever(2, footer_y + 3, "ENTER:Lancar F:Armar X:Detonar", colors.lightGray)
-    monEscrever(2, footer_y + 4, "M:Modo  BKSP:Emergencia  Q:Sair", colors.lightGray)
-end
-
--- ======== PROCESSAMENTO DE TECLAS ========
-
-local function processarTecla(tecla)
-    -- Input de coordenadas GPS ativo?
-    if estacao.input_ativo then
-        -- Processar digitação de coordenadas
-        if tecla == keys.enter then
-            -- Finalizar input
-            local val = tonumber(estacao.input_buffer)
-            if val then
-                if estacao.input_campo == "x" then
-                    estacao.alvo_x = val
-                    estacao.input_campo = "y"
-                    estacao.input_buffer = ""
-                    log("Alvo X = " .. val .. ". Digite Y:")
-                elseif estacao.input_campo == "y" then
-                    estacao.alvo_y = val
-                    estacao.input_campo = "z"
-                    estacao.input_buffer = ""
-                    log("Alvo Y = " .. val .. ". Digite Z:")
-                elseif estacao.input_campo == "z" then
-                    estacao.alvo_z = val
-                    estacao.input_ativo = false
-                    estacao.input_buffer = ""
-                    log("Alvo Z = " .. val)
-                    log("Alvo definido: " .. estacao.alvo_x .. ", " .. estacao.alvo_y .. ", " .. estacao.alvo_z)
-                    -- Enviar alvo para o míssil
-                    enviarComando("alvo", {
-                        x = estacao.alvo_x,
-                        y = estacao.alvo_y,
-                        z = estacao.alvo_z
-                    })
-                end
-            else
-                log("Valor invalido! Tente novamente.")
-                estacao.input_buffer = ""
-            end
-        elseif tecla == keys.backspace then
-            estacao.input_buffer = string.sub(estacao.input_buffer, 1, -2)
-        end
+local function teclado()
+  while true do
+    local event, key = os.pullEvent()
+    if event == "key" then
+      if key == keys.p then enviar("ping")
+      elseif key == keys.l then
+        enviar("lancar")
+        estado.mensagem = "Comando de lançamento enviado"
+      elseif key == keys.x then
+        enviar("abortar")
+        estado.mensagem = "Comando de abortar enviado"
+      elseif key == keys.r then
+        estado.link = false
+        enviar("ping")
+        estado.mensagem = "Reconectando"
+      elseif key == keys.q then
+        enviar("sair")
         return
+      end
     end
-    
-    -- Controles normais
-    if tecla == config.TECLA_CIMA then
-        estacao.pitch_cmd = estacao.pitch_cmd + config.TILT_STEP
-        enviarComando("pitch", { valor = estacao.pitch_cmd })
-        
-    elseif tecla == config.TECLA_BAIXO then
-        estacao.pitch_cmd = estacao.pitch_cmd - config.TILT_STEP
-        enviarComando("pitch", { valor = estacao.pitch_cmd })
-        
-    elseif tecla == config.TECLA_ESQUERDA then
-        estacao.yaw_cmd = estacao.yaw_cmd - config.TILT_STEP
-        enviarComando("yaw", { valor = estacao.yaw_cmd })
-        
-    elseif tecla == config.TECLA_DIREITA then
-        estacao.yaw_cmd = estacao.yaw_cmd + config.TILT_STEP
-        enviarComando("yaw", { valor = estacao.yaw_cmd })
-        
-    elseif tecla == config.TECLA_THROTTLE_UP then
-        estacao.throttle_cmd = math.min(config.THROTTLE_MAX, estacao.throttle_cmd + config.THROTTLE_STEP)
-        enviarComando("throttle", { valor = estacao.throttle_cmd })
-        
-    elseif tecla == config.TECLA_THROTTLE_DOWN then
-        estacao.throttle_cmd = math.max(config.THROTTLE_MIN, estacao.throttle_cmd - config.THROTTLE_STEP)
-        enviarComando("throttle", { valor = estacao.throttle_cmd })
-        
-    elseif tecla == config.TECLA_LANCAR then
-        log("Comando: LANCAR!")
-        estacao.throttle_cmd = config.THROTTLE_MAX
-        enviarComando("lancar")
-        
-    elseif tecla == config.TECLA_ARMAR then
-        log("Comando: ARMAR ogiva")
-        enviarComando("armar")
-        
-    elseif tecla == config.TECLA_DETONAR then
-        log("Comando: DETONAR!")
-        enviarComando("detonar")
-        
-    elseif tecla == config.TECLA_EMERGENCIA then
-        log("!!! EMERGENCIA - AUTODESTRUICAO !!!")
-        enviarComando("emergencia")
-        
-    elseif tecla == config.TECLA_MODO then
-        -- Alternar modo
-        if estacao.modo == config.MODO_MANUAL then
-            estacao.modo = config.MODO_GPS
-            log("Modo alterado para GPS")
-            -- Pedir coordenadas do alvo
-            log("Digite coordenada X do alvo:")
-            estacao.input_ativo = true
-            estacao.input_campo = "x"
-            estacao.input_buffer = ""
-        else
-            estacao.modo = config.MODO_MANUAL
-            log("Modo alterado para MANUAL")
-        end
-        enviarComando("modo", { valor = estacao.modo })
-        
-    elseif tecla == config.TECLA_SAIR then
-        log("Encerrando estacao de controle...")
-        estacao.rodando = false
-    end
+  end
 end
 
-local function processarChar(char)
-    if estacao.input_ativo then
-        -- Aceitar dígitos, ponto e sinal negativo
-        if char:match("[%d%.%-]") then
-            estacao.input_buffer = estacao.input_buffer .. char
-        end
-    end
+local function telaLoop()
+  while true do
+    if os.clock() - estado.ultima > TIMEOUT then estado.link = false end
+    desenhar()
+    sleep(0.25)
+  end
 end
-
--- ======== LOOPS PRINCIPAIS ========
-
-local function loopReceberTelemetria()
-    while estacao.rodando do
-        local event, side, canal, reply, msg, dist = os.pullEvent("modem_message")
-        if canal == config.CANAL_RECEBER then
-            local ok, dados = pcall(textutils.unserialise, msg)
-            if ok and dados and dados.protocolo == config.PROTOCOLO then
-                if dados.tipo == "telemetria" then
-                    estacao.telemetria = dados.estado
-                    estacao.conectado = true
-                    estacao.ultimo_ping = os.clock()
-                elseif dados.tipo == "pong" then
-                    estacao.conectado = true
-                    estacao.ultimo_ping = os.clock()
-                end
-            end
-        end
-    end
-end
-
-local function loopInput()
-    while estacao.rodando do
-        local event, param = os.pullEvent()
-        if event == "key" then
-            processarTecla(param)
-        elseif event == "char" then
-            processarChar(param)
-        end
-    end
-end
-
-local function loopDesenhar()
-    while estacao.rodando do
-        -- Verificar timeout de conexão
-        if os.clock() - estacao.ultimo_ping > 3 then
-            estacao.conectado = false
-        end
-        
-        -- Redesenhar HUD
-        desenharHUD()
-        
-        -- Ping periódico
-        ping()
-        
-        sleep(0.5)
-    end
-end
-
--- ======== INICIALIZAÇÃO ========
-
-local function inicializar()
-    term.clear()
-    term.setCursorPos(1, 1)
-    print("================================")
-    print("  ESTACAO DE CONTROLE v1.0")
-    print("  Missil Teleguiado")
-    print("================================")
-    print()
-    
-    -- Modem
-    modem = encontrarModem()
-    if not modem then
-        print("ERRO: Nenhum modem wireless encontrado!")
-        print("Conecte um modem wireless ao computador.")
-        return false
-    end
-    modem.open(config.CANAL_RECEBER)
-    modem.open(config.CANAL_ENVIO)
-    print("Modem wireless inicializado")
-    
-    -- Monitor
-    monitor = encontrarMonitor()
-    if monitor then
-        mon = monitor
-        mon.setTextScale(config.MONITOR_SCALE)
-        print("Monitor encontrado e configurado")
-    else
-        -- Sem monitor, usa o terminal do computador
-        mon = term.current()
-        print("AVISO: Sem monitor externo, usando terminal")
-    end
-    
-    print()
-    print("Estacao pronta! Use as teclas para controlar.")
-    print("Pressione Q para sair.")
-    print()
-    
-    return true
-end
-
--- ======== MAIN ========
 
 local function main()
-    if not inicializar() then
-        print("Pressione qualquer tecla para sair...")
-        os.pullEvent("key")
-        return
-    end
-    
-    -- Rodar loops em paralelo
-    parallel.waitForAny(
-        loopReceberTelemetria,
-        loopInput,
-        loopDesenhar
-    )
-    
-    -- Limpar
-    if monitor then
-        monitor.setBackgroundColor(colors.black)
-        monitor.clear()
-        monitor.setCursorPos(1, 1)
-        monitor.write("Estacao desligada")
-    end
-    
-    term.clear()
-    term.setCursorPos(1, 1)
-    print("Estacao de controle encerrada.")
+  modem = encontrarModem()
+  if not modem then error("Modem wireless nao encontrado") end
+  modem.open(CANAL_TELEMETRIA)
+  tela = peripheral.find("monitor") or term.current()
+  if tela.setTextScale and peripheral.find("monitor") then tela.setTextScale(0.5) end
+  enviar("ping")
+  parallel.waitForAny(receber, teclado, telaLoop)
+  fundo(colors.black)
+  cor(colors.white)
+  tela.clear()
+  tela.setCursorPos(1, 1)
+  tela.write("Estacao encerrada.")
 end
 
-main()
+local ok, err = pcall(main)
+if not ok and err ~= "Terminated" then printError(err) end

@@ -7,6 +7,12 @@ local VERSAO = "2.0"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local LIMIAR = 3 -- inclinacao minima (graus) aceita nas calibracoes
+local RADIO_PROTOCOLO = "BFM_REMOTE_1"
+local RADIO_COMANDO = 4210
+local RADIO_TELEMETRIA = 4211
+local RADIO_TIMEOUT = 3
+local modoRemoto = false
+local radio = nil
 
 ---------------------------------------------------------------- TELA
 
@@ -240,7 +246,7 @@ local TIPOS_MOTOR = {
   { tipo = "creative_thruster",   classe = "criativo", rotulo = "CRI" },
 }
 
-local P = { vetores = {}, motores = {} }
+local P = { vetores = {}, motores = {}, modem = nil }
 
 local function temTipo(nome, lista)
   for _, t in ipairs(lista) do
@@ -250,9 +256,14 @@ local function temTipo(nome, lista)
 end
 
 local function detectar()
-  P = { gimbal = nil, drive = nil, vetores = {}, motores = {} }
+  P = { gimbal = nil, drive = nil, vetores = {}, motores = {}, modem = nil }
   for _, nome in ipairs(peripheral.getNames()) do
-    if peripheral.hasType(nome, "gimbal_sensor") then
+    if peripheral.hasType(nome, "modem") then
+      local candidato = peripheral.wrap(nome)
+      if candidato and candidato.isWireless and candidato.isWireless() then
+        P.modem = P.modem or { nome = nome, p = candidato }
+      end
+    elseif peripheral.hasType(nome, "gimbal_sensor") then
       P.gimbal = P.gimbal or peripheral.wrap(nome)
     elseif temTipo(nome, TIPOS_VETOR) then
       table.insert(P.vetores, { nome = nome, p = peripheral.wrap(nome) })
@@ -268,6 +279,8 @@ local function detectar()
       end
     end
   end
+  radio = P.modem and P.modem.p or nil
+  if radio then radio.open(RADIO_COMANDO) end
 end
 
 local function contar(classe)
@@ -276,6 +289,28 @@ local function contar(classe)
     if m.classe == classe then n = n + 1 end
   end
   return n
+end
+
+local function radioEnviar(tipo, dados)
+  if not radio then return end
+  local pacote = { protocolo = RADIO_PROTOCOLO, tipo = tipo, dados = dados or {} }
+  pcall(radio.transmit, RADIO_TELEMETRIA, RADIO_COMANDO, textutils.serialize(pacote))
+end
+
+local function radioReceber(timeout)
+  if not radio then return nil end
+  local timer = os.startTimer(timeout or RADIO_TIMEOUT)
+  while true do
+    local ev, p1, canal, _, mensagem = os.pullEvent()
+    if ev == "modem_message" and canal == RADIO_COMANDO then
+      local ok, pacote = pcall(textutils.unserialize, mensagem)
+      if ok and type(pacote) == "table" and pacote.protocolo == RADIO_PROTOCOLO then
+        return pacote
+      end
+    elseif ev == "timer" and p1 == timer then
+      return nil
+    end
+  end
 end
 
 -- chama um metodo sem quebrar se ele nao existir
@@ -832,7 +867,7 @@ local function desenharHorizonte(n, l)
   escrever(px, py, "@", c)
 end
 
-local function voo()
+local function voo(remoto)
   detectar()
   if not exigir(true) then return end
 
@@ -841,7 +876,8 @@ local function voo()
     if m.classe ~= "solido" or cfg.usarSolidos then table.insert(ativos, m) end
   end
 
-  -- checklist
+  -- checklist local; o modo remoto confirma a prontidao na estacao
+  if not remoto then
   cabecalho("LANCAMENTO")
   local function item(y, rotulo, valor, bom)
     escrever(2, y, rotulo, colors.lightGray)
@@ -864,10 +900,11 @@ local function voo()
     escrever(2, 13, "Solidos NAO apagam depois de acesos!", colors.orange)
   end
   rodape("ENTER lancar   BACKSPACE cancelar")
-  while true do
-    local _, k = os.pullEvent("key")
-    if k == keys.enter then break end
-    if k == keys.backspace then return end
+    while true do
+      local _, k = os.pullEvent("key")
+      if k == keys.enter then break end
+      if k == keys.backspace then return end
+    end
   end
 
   -- contagem regressiva
@@ -905,6 +942,14 @@ local function voo()
 
   -- estado compartilhado entre as tarefas
   local E = { n = 0, l = 0, giro = 0, cx = 0, cy = 0, hz = 0 }
+
+  local function enviarEstadoRemoto(total)
+    radioEnviar("telemetria", {
+      status = "voo", norte = E.n, leste = E.l, giro = E.giro,
+      bocalX = E.cx, bocalY = E.cy, empuxo = total, hz = E.hz,
+      tempo = os.clock() - inicio, anguloMaximo = incMax,
+    })
+  end
 
   -- As chamadas a perifericos descartam eventos enquanto esperam o jogo,
   -- entao o voo roda em 3 tarefas paralelas, cada uma com seu proprio sleep.
@@ -969,6 +1014,7 @@ local function voo()
         end
         table.insert(linhas, { m = m, kn = kn, txt = txt, tem = tem })
       end
+      enviarEstadoRemoto(total)
       if #ativos > 0 and not algum then
         motivo = "Combustivel esgotado"
         return
@@ -1007,7 +1053,22 @@ local function voo()
     end
   end
 
-  local ok, err = pcall(parallel.waitForAny, controle, telemetria, teclado)
+  local function comandoRemoto()
+    while true do
+      local pacote = radioReceber(0.5)
+      if pacote and pacote.tipo == "comando" then
+        local acao = pacote.dados and pacote.dados.acao
+        if acao == "abortar" then
+          motivo = "Abortado pela estacao"
+          return
+        elseif acao == "ping" then
+          radioEnviar("pong", { status = "voo", tempo = os.clock() - inicio })
+        end
+      end
+    end
+  end
+
+  local ok, err = pcall(parallel.waitForAny, controle, telemetria, teclado, comandoRemoto)
 
   desligarTudo()
   if not ok then
@@ -1025,6 +1086,31 @@ local function voo()
     table.insert(linhas, "Solidos podem continuar queimando!")
   end
   aviso("VOO ENCERRADO", linhas, ok and colors.white or colors.red)
+end
+
+local function modoRemoto()
+  detectar()
+  if not radio then
+    aviso("RADIO", { "Modem wireless nao encontrado.", "Conecte um modem ao computador." }, colors.red)
+    return
+  end
+  radioEnviar("pronto", { status = "aguardando", versao = VERSAO })
+  while true do
+    local pacote = radioReceber(30)
+    if pacote and pacote.tipo == "comando" then
+      local acao = pacote.dados and pacote.dados.acao
+      if acao == "ping" then
+        radioEnviar("pong", { status = "aguardando", versao = VERSAO })
+      elseif acao == "lancar" then
+        radioEnviar("estado", { status = "iniciando" })
+        voo(true)
+        radioEnviar("estado", { status = "encerrado" })
+      elseif acao == "sair" then
+        radioEnviar("estado", { status = "encerrado" })
+        return
+      end
+    end
+  end
 end
 
 ---------------------------------------------------------------- MENU
@@ -1071,7 +1157,9 @@ end
 
 carregarConfig()
 local ok, err = pcall(function()
-  if arg[1] == "lancar" then voo() else principal() end
+  if arg[1] == "lancar" then voo()
+  elseif arg[1] == "remoto" then modoRemoto()
+  else principal() end
 end)
 pcall(detectar)
 pcall(desligarTudo)

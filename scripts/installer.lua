@@ -47,11 +47,12 @@ if tipo == "missil" or tipo == "missile" then
     print("Instalacao incompleta.")
   end
 elseif tipo == "estacao" or tipo == "station" then
-  print("A estacao ainda usa os arquivos existentes do projeto.")
-  download("config.lua", "config.lua")
   download("estacao/startup.lua", "startup.lua")
   download("estacao/estacao.lua", "estacao.lua")
+  print("Estacao nova instalada.")
+  print("No veiculo, inicie: missil remoto")
 else
-  print("Uso: installer missil")
-  print("O modo missil instala apenas o codigo BlockForge anexado.")
+  print("Uso: installer missil   ou   installer estacao")
+  print("missil: controlador local BlockForge")
+  print("estacao: painel remoto wireless novo")
 end
