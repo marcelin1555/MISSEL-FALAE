@@ -58,17 +58,50 @@ local function encontrarModem()
 end
 
 local function encontrarTiltAdapters()
-    -- Procura todos os tilt adapters conectados
+    -- Procura todos os tilt adapters conectados (Normal e Advanced)
     local adapters = {}
     local nomes = peripheral.getNames()
+    
+    -- Se o usuário especificou nomes de periféricos no config.lua
+    if config.TILT_PITCH_NAME and peripheral.isPresent(config.TILT_PITCH_NAME) then
+        table.insert(adapters, {
+            nome = config.TILT_PITCH_NAME,
+            eixo = "pitch",
+            isAdvanced = false,
+            periferico = peripheral.wrap(config.TILT_PITCH_NAME)
+        })
+        log("Tilt Pitch configurado manualmente: " .. config.TILT_PITCH_NAME)
+    end
+    if config.TILT_YAW_NAME and peripheral.isPresent(config.TILT_YAW_NAME) then
+        table.insert(adapters, {
+            nome = config.TILT_YAW_NAME,
+            eixo = "yaw",
+            isAdvanced = false,
+            periferico = peripheral.wrap(config.TILT_YAW_NAME)
+        })
+        log("Tilt Yaw configurado manualmente: " .. config.TILT_YAW_NAME)
+    end
+
+    if #adapters > 0 then return adapters end
+
+    -- Detecção automática
     for _, nome in ipairs(nomes) do
-        local tipo = peripheral.getType(nome)
-        if tipo and (string.find(tipo, "tilt") or string.find(tipo, "Tilt")) then
+        local tipo = peripheral.getType(nome) or ""
+        local tipoLower = string.lower(tipo)
+        if string.find(tipoLower, "tilt") then
+            local p = peripheral.wrap(nome)
+            local isAdvanced = string.find(tipoLower, "advanced") ~= nil or (config.TILT_TIPO == "advanced") or (p.setPitch ~= nil and p.setYaw ~= nil)
             table.insert(adapters, {
                 nome = nome,
-                periferico = peripheral.wrap(nome)
+                tipo = tipo,
+                isAdvanced = isAdvanced,
+                periferico = p
             })
-            log("Tilt adapter encontrado: " .. nome)
+            if isAdvanced then
+                log("Advanced Tilt Adapter encontrado: " .. nome)
+            else
+                log("Tilt Adapter Normal encontrado: " .. nome)
+            end
         end
     end
     return adapters
@@ -90,9 +123,9 @@ local function inicializarPeripherals()
     -- Tilt adapters
     tilt_adapters = encontrarTiltAdapters()
     if #tilt_adapters == 0 then
-        log("AVISO: Nenhum tilt adapter encontrado!")
+        log("AVISO: Nenhum tilt adapter encontrado (Normal ou Advanced)!")
     else
-        log("Tilt adapters encontrados: " .. #tilt_adapters)
+        log("Total de Tilt Adapters ativos: " .. #tilt_adapters)
     end
     
     -- Teste de redstone
@@ -110,38 +143,74 @@ local function setThrottle(nivel)
     redstone.setAnalogOutput(config.THRUSTER_SIDE, nivel)
 end
 
-local function setPitch(angulo)
-    angulo = math.max(-config.TILT_MAX_ANGLE, math.min(config.TILT_MAX_ANGLE, angulo))
-    estado.pitch = angulo
+local function aplicarTilt(pitch, yaw)
+    pitch = math.max(-config.TILT_MAX_ANGLE, math.min(config.TILT_MAX_ANGLE, pitch))
+    yaw = math.max(-config.TILT_MAX_ANGLE, math.min(config.TILT_MAX_ANGLE, yaw))
+    estado.pitch = pitch
+    estado.yaw = yaw
     
-    -- Aplica nos tilt adapters de pitch
     for i, adapter in ipairs(tilt_adapters) do
-        if adapter.periferico.setTargetAngle then
-            -- Se for o primeiro adapter, usa como pitch
-            if i == 1 or (i % 2 == 1) then
-                pcall(function()
-                    adapter.periferico.setTargetAngle(angulo)
-                end)
-            end
+        local p = adapter.periferico
+        
+        -- Caso 1: Advanced Tilt Adapter (controle de 2 eixos num único bloco)
+        if adapter.isAdvanced then
+            pcall(function()
+                if p.setPitchAndYaw then
+                    p.setPitchAndYaw(pitch, yaw)
+                elseif p.setTargetPitch and p.setTargetYaw then
+                    p.setTargetPitch(pitch)
+                    p.setTargetYaw(yaw)
+                elseif p.setPitch and p.setYaw then
+                    p.setPitch(pitch)
+                    p.setYaw(yaw)
+                elseif p.setTargetAngle then
+                    p.setTargetAngle(pitch, yaw)
+                elseif p.setAngle then
+                    p.setAngle(pitch, yaw)
+                end
+            end)
+        else
+            -- Caso 2: Tilt Adapters Normais (1 eixo por bloco)
+            pcall(function()
+                if adapter.eixo == "pitch" then
+                    if p.setPitch then p.setPitch(pitch)
+                    elseif p.setTargetPitch then p.setTargetPitch(pitch)
+                    elseif p.setTargetAngle then p.setTargetAngle(pitch)
+                    elseif p.setAngle then p.setAngle(pitch)
+                    end
+                elseif adapter.eixo == "yaw" then
+                    if p.setYaw then p.setYaw(yaw)
+                    elseif p.setTargetYaw then p.setTargetYaw(yaw)
+                    elseif p.setTargetAngle then p.setTargetAngle(yaw)
+                    elseif p.setAngle then p.setAngle(yaw)
+                    end
+                else
+                    -- Auto-distribuição em pares: 1º pitch, 2º yaw
+                    if i == 1 or (i % 2 == 1) then
+                        if p.setPitch then p.setPitch(pitch)
+                        elseif p.setTargetPitch then p.setTargetPitch(pitch)
+                        elseif p.setTargetAngle then p.setTargetAngle(pitch)
+                        elseif p.setAngle then p.setAngle(pitch)
+                        end
+                    else
+                        if p.setYaw then p.setYaw(yaw)
+                        elseif p.setTargetYaw then p.setTargetYaw(yaw)
+                        elseif p.setTargetAngle then p.setTargetAngle(yaw)
+                        elseif p.setAngle then p.setAngle(yaw)
+                        end
+                    end
+                end
+            end)
         end
     end
 end
 
+local function setPitch(angulo)
+    aplicarTilt(angulo, estado.yaw)
+end
+
 local function setYaw(angulo)
-    angulo = math.max(-config.TILT_MAX_ANGLE, math.min(config.TILT_MAX_ANGLE, angulo))
-    estado.yaw = angulo
-    
-    -- Aplica nos tilt adapters de yaw
-    for i, adapter in ipairs(tilt_adapters) do
-        if adapter.periferico.setTargetAngle then
-            -- Se for o segundo adapter, usa como yaw
-            if i == 2 or (i % 2 == 0) then
-                pcall(function()
-                    adapter.periferico.setTargetAngle(angulo)
-                end)
-            end
-        end
-    end
+    aplicarTilt(estado.pitch, angulo)
 end
 
 local function ativarDetonacao()

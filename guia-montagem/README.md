@@ -12,8 +12,8 @@ Guia passo-a-passo para construir o míssil e a estação de controle no Minecra
 |------------|------|-----|
 | 1x | Advanced Computer | CC:Tweaked |
 | 1x | Ender Modem (ou Wireless Modem) | CC:Tweaked |
-| 2x | Vector Thruster | Create Propulsion |
-| 2x | Tilt Adapter | Create Propulsion |
+| 1x ou 2x | Vector Thruster | Create Propulsion |
+| 1x | **Advanced Tilt Adapter** (ou 2x Tilt Adapter Normal) | Create Propulsion |
 | 1x | Solid Fuel Thruster (opcional, booster) | Create Propulsion |
 | 1x | Physics Assembler | Create Simulated |
 | ~20x | Blocos de estrutura (ferro, cobre, etc.) | Vanilla/Create |
@@ -23,15 +23,22 @@ Guia passo-a-passo para construir o míssil e a estação de controle no Minecra
 ### Passo a Passo
 
 #### 1. Base do Míssil (corpo)
-```
-Vista lateral (corte):
 
-   [TNT]           ← Ogiva (topo) - conectada ao lado "top" do computador
-   [COMPUTADOR]    ← Computador Advanced com modem na lateral
-   [TILT 1]        ← Tilt Adapter para PITCH (primeiro detectado)
-   [VECTOR THR 1]  ← Vector Thruster principal
-   [TILT 2]        ← Tilt Adapter para YAW (segundo detectado)
-   [VECTOR THR 2]  ← Vector Thruster secundário
+**Opção A: Usando Advanced Tilt Adapter (Recomendado - 1 único bloco)**
+```
+   [TNT]                   ← Ogiva (topo) - conectada ao lado "top" do computador
+   [COMPUTADOR]            ← Computador Advanced com modem na lateral
+   [ADVANCED TILT ADAPTER] ← Controla Pitch + Yaw simultaneamente em 2 eixos
+   [VECTOR THRUSTER]       ← Vector Thruster principal (atrás)
+```
+
+**Opção B: Usando Tilt Adapters Normais (2 blocos - 1 eixo por bloco)**
+```
+   [TNT]                   ← Ogiva (topo)
+   [COMPUTADOR]            ← Computador Advanced
+   [TILT ADAPTER 1]        ← Tilt Adapter para PITCH
+   [TILT ADAPTER 2]        ← Tilt Adapter para YAW
+   [VECTOR THRUSTER]       ← Vector Thruster principal
 ```
 
 #### 2. Conectando o Computador

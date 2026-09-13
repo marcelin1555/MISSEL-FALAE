@@ -11,11 +11,12 @@ config.CANAL_RECEBER  = 43    -- canal para receber telemetria
 config.PROTOCOLO      = "MISSIL_TG"
 config.INTERVALO_TELEMETRIA = 0.25 -- segundos entre pacotes de telemetria
 
--- === PERIFÉRICOS (nomes padrão) ===
--- O script tenta encontrar automaticamente, mas você pode forçar nomes aqui
+-- === PERIFÉRICOS ===
+-- O script detecta automaticamente, mas você pode especificar aqui
 config.MODEM_SIDE          = nil  -- nil = auto-detectar
-config.TILT_PITCH_NAME     = nil  -- nil = auto-detectar ("tilt_adapter" com eixo X)
-config.TILT_YAW_NAME       = nil  -- nil = auto-detectar ("tilt_adapter" com eixo Y)
+config.TILT_TIPO           = "auto" -- "auto", "advanced", ou "normal"
+config.TILT_PITCH_NAME     = nil  -- nil = auto-detectar ("tilt_adapter_0" para Pitch)
+config.TILT_YAW_NAME       = nil  -- nil = auto-detectar ("tilt_adapter_1" para Yaw)
 
 -- === CONTROLE DE VOO ===
 config.THROTTLE_MIN        = 0    -- nível mínimo de redstone (0-15)
