@@ -207,3 +207,43 @@ v4.7-warhead
 - voo.csv: coluna rcs (1 = warhead ligada) no lugar de rcsX/rcsZ/rcsNivel.
   Telemetria: rcs = 0/1.
 Base v2.0 e torres de GPS: iguais a v4.5.
+
+v4.8-base3 (base v3.0)
+----------------------
+Junta a v4.7-warhead (RCS pela Guidance Warhead, igual) com a BASE v3.0 e a
+ordem de lancamento cifrada.
+BASE v3.0 - Centro de Controle (repaginacao completa):
+- Seguranca por disquete de autorizacao: chave aleatoria de 256 bits
+  gravada cifrada no disquete (PBKDF2-HMAC-SHA256 com o PIN opcional);
+  a base guarda so o hash, preso ao ID do disquete. Copiar os arquivos para
+  outro disquete nao funciona. PIN errado 3x bloqueia 60 s. Tirar o
+  disquete trava a base na hora. Emitir, revogar, trocar PIN e registro de
+  seguranca (/bfm_log.txt). Com disquete emitido, lancar e configurar
+  exigem autorizacao.
+- Codigos dos misseis guardados cifrados no disquete.
+- Verificacao GO / NO-GO: rede, autorizacao, chave mestra, missil, versao,
+  prontidao, codigo, cifra, alvo, alcance, zona de exclusao, desacoplagem,
+  monitor. Qualquer NO-GO critico impede o lancamento.
+- Contagem terminal na base (padrao 10 s) com HOLD automatico: disquete
+  removido, chave mestra em SEGURO ou missil sem resposta.
+- Desacoplagem automatica por redstone (Redstone Link): sinal na saida
+  escolhida (lado ou Redstone Relay) apos a IGNICAO, pulso ou mantido,
+  invertido opcional, confirmacao de separacao e aborto se nao separar.
+  Tecla D no voo desacopla na mao. Teste no menu Configuracao.
+- Monitor de missoes (monitor avancado): status GO/NO-GO, seguranca, frota
+  na rede e registro; na missao, mapa tatico visto de cima, perfil de
+  altitude, telemetria, contagem grande e eventos. Toque alterna a pagina.
+- Sirene/luzes (saida de redstone) na contagem e no voo; chave mestra
+  (alavanca na entrada de redstone).
+- Historico com trilha do voo e mapa, operador e disquete de cada lancamento.
+- Abortar pede confirmacao (A duas vezes).
+Missil v4.8:
+- Tudo da v4.7-warhead.
+- Ordem de lancamento cifrada: a base pede um desafio (numero unico, vale
+  uma vez por 10 s) e manda HMAC-SHA256(codigo, desafio + alvo + id da base).
+  O codigo nao passa mais pela rede.
+- Novo ajuste Sistema > "So aceitar ordem cifrada" (padrao SIM): a base
+  v2.0 nao consegue lancar um missil com codigo.
+- Status informa auth e contagem.
+Ferramentas: cc_simulador.lua + teste_base.py (testes fora do jogo com lupa).
+Torres de GPS: iguais a v4.6.

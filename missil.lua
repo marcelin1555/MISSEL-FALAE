@@ -4,7 +4,7 @@
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "4.7"
+local VERSAO = "4.8"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -321,7 +321,7 @@ local PADRAO = {
   usarRcs = true, empuxoRcs = 2000, ladoRcs = 0.04, tempoRcs = 8,
   canalRcs = {}, -- saida de redstone que liga a guiagem dos RCS: {dev, lado}
   -- sistema
-  codigo = "", iniciarRemoto = false,
+  codigo = "", soCifrado = true, iniciarRemoto = false,
   alvoX = 0, alvoY = 64, alvoZ = 0,
 }
 
@@ -385,6 +385,133 @@ end
 local function salvarConfig()
   gravarTabela(ARQ_CONFIG, cfg)
 end
+
+---------------------------------------------------------------- CRIPTOGRAFIA
+
+-- [cripto-inicio]
+-- SHA-256, HMAC e PBKDF2 em Lua puro (bit32 do CC: Tweaked).
+local cripto = {}
+do
+  local band, bor, bxor, bnot = bit32.band, bit32.bor, bit32.bxor, bit32.bnot
+  local rshift, rrotate = bit32.rshift, bit32.rrotate
+  local M = 4294967296
+  local K = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  }
+
+  function cripto.sha256(msg)
+    local ml = #msg
+    local bits = ml * 8
+    local cauda = {}
+    for i = 7, 0, -1 do cauda[#cauda + 1] = string.char(math.floor(bits / 2 ^ (8 * i)) % 256) end
+    msg = msg .. "\128" .. string.rep("\0", (55 - ml) % 64) .. table.concat(cauda)
+    local h0, h1, h2, h3 = 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a
+    local h4, h5, h6, h7 = 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    local w = {}
+    for bloco = 1, #msg, 64 do
+      for i = 0, 15 do
+        local a, b, c, d = msg:byte(bloco + i * 4, bloco + i * 4 + 3)
+        w[i] = ((a * 256 + b) * 256 + c) * 256 + d
+      end
+      for i = 16, 63 do
+        local v, u = w[i - 15], w[i - 2]
+        w[i] = (w[i - 16] + bxor(rrotate(v, 7), rrotate(v, 18), rshift(v, 3)) + w[i - 7]
+          + bxor(rrotate(u, 17), rrotate(u, 19), rshift(u, 10))) % M
+      end
+      local a, b, c, d, e, f, g, h = h0, h1, h2, h3, h4, h5, h6, h7
+      for i = 0, 63 do
+        local t1 = (h + bxor(rrotate(e, 6), rrotate(e, 11), rrotate(e, 25))
+          + bxor(band(e, f), band(bnot(e), g)) + K[i + 1] + w[i]) % M
+        local t2 = (bxor(rrotate(a, 2), rrotate(a, 13), rrotate(a, 22))
+          + bxor(band(a, b), band(a, c), band(b, c))) % M
+        h, g, f, e, d, c, b, a = g, f, e, (d + t1) % M, c, b, a, (t1 + t2) % M
+      end
+      h0, h1, h2, h3 = (h0 + a) % M, (h1 + b) % M, (h2 + c) % M, (h3 + d) % M
+      h4, h5, h6, h7 = (h4 + e) % M, (h5 + f) % M, (h6 + g) % M, (h7 + h) % M
+    end
+    local out = {}
+    for _, v in ipairs({ h0, h1, h2, h3, h4, h5, h6, h7 }) do
+      out[#out + 1] = string.char(math.floor(v / 16777216) % 256, math.floor(v / 65536) % 256,
+        math.floor(v / 256) % 256, v % 256)
+    end
+    return table.concat(out)
+  end
+
+  -- a e b com o mesmo tamanho
+  function cripto.xor(a, b)
+    local r = {}
+    for i = 1, #a do r[i] = string.char(bxor(a:byte(i), b:byte(i))) end
+    return table.concat(r)
+  end
+
+  function cripto.hmac(chave, msg)
+    if #chave > 64 then chave = cripto.sha256(chave) end
+    chave = chave .. string.rep("\0", 64 - #chave)
+    local dentro = cripto.xor(chave, string.rep("\54", 64))
+    local fora = cripto.xor(chave, string.rep("\92", 64))
+    return cripto.sha256(fora .. cripto.sha256(dentro .. msg))
+  end
+
+  -- PBKDF2-HMAC-SHA256 com 32 bytes; cede a vez de tempos em tempos
+  function cripto.derivar(senha, sal, voltas)
+    local u = cripto.hmac(senha, sal .. "\0\0\0\1")
+    local r = u
+    for i = 2, voltas do
+      u = cripto.hmac(senha, u)
+      r = cripto.xor(r, u)
+      if i % 32 == 0 then
+        os.queueEvent("bfm_cripto")
+        os.pullEvent("bfm_cripto")
+      end
+    end
+    return r
+  end
+
+  function cripto.hex(s)
+    return (s:gsub(".", function(c) return ("%02x"):format(c:byte()) end))
+  end
+
+  function cripto.deHex(h)
+    if type(h) ~= "string" or #h % 2 == 1 or h:find("[^%x]") then return nil end
+    return (h:gsub("%x%x", function(p) return string.char(tonumber(p, 16)) end))
+  end
+
+  -- compara sem parar no primeiro byte diferente
+  function cripto.igual(a, b)
+    if type(a) ~= "string" or type(b) ~= "string" or #a ~= #b then return false end
+    local d = 0
+    for i = 1, #a do d = bor(d, bxor(a:byte(i), b:byte(i))) end
+    return d == 0
+  end
+
+  -- bytes imprevisiveis: relogios, sorteio e enderecos de memoria misturados no SHA-256
+  local reserva, contador = "", 0
+  function cripto.aleatorio(n)
+    local out, tam = {}, 0
+    while tam < n do
+      contador = contador + 1
+      reserva = cripto.sha256(table.concat({ reserva, tostring(os.epoch and os.epoch("utc") or 0),
+        tostring(os.clock()), tostring(math.random()), tostring(os.getComputerID()),
+        tostring(contador), tostring({}) }, "|"))
+      out[#out + 1] = reserva
+      tam = tam + 32
+    end
+    return table.concat(out):sub(1, n)
+  end
+end
+
+-- mensagem assinada na ordem de lancamento (base e missil montam igual)
+local function mensagemLancar(nonce, alvo, idBase)
+  return ("BFM-LANCAR|%s|%.2f|%.2f|%.2f|%d"):format(nonce, alvo.x, alvo.y, alvo.z, idBase)
+end
+-- [cripto-fim]
 
 ---------------------------------------------------------------- PERIFERICOS
 
@@ -745,6 +872,7 @@ local function statusMissil()
     pronto = #problemas == 0, problemas = problemas,
     pos = ultimaPos, precisaCodigo = cfg.codigo ~= "", preset = cfg.nome,
     vet = #P.vetores, liq = contar("liquido"), sol = contar("solido"),
+    auth = 1, contagem = cfg.contagem,
   }
 end
 
@@ -1994,7 +2122,7 @@ local function voar(opts)
         elseif msg.tipo == "ping" then
           rednet.send(id, { tipo = "status", nome = nomeRede(), versao = VERSAO,
             pronto = false, emVoo = true, problemas = { "em voo" },
-            pos = S.pos, preset = cfg.nome, precisaCodigo = cfg.codigo ~= "",
+            pos = S.pos, preset = cfg.nome, precisaCodigo = cfg.codigo ~= "", auth = 1,
             vet = #P.vetores, liq = contar("liquido"), sol = contar("solido") }, PROTOCOLO)
         end
       end
@@ -2100,6 +2228,18 @@ local function modoRemoto()
     local pedido, sair = nil, false
     local contato = nil
     local posTxt = "procurando..."
+    local desafio = nil
+
+    -- confere o codigo: resposta ao desafio (HMAC) ou, se permitido, o codigo aberto
+    local function codigoCerto(msg, id, alvo)
+      if type(msg.auth) == "string" then
+        local d = desafio
+        desafio = nil -- cada desafio vale uma vez
+        if not d or d.id ~= id or os.clock() > d.ate then return false end
+        return cripto.igual(cripto.hex(cripto.hmac(cfg.codigo, mensagemLancar(d.nonce, alvo, id))), msg.auth)
+      end
+      return not cfg.soCifrado and msg.codigo == cfg.codigo
+    end
 
     local function tela()
       local st = statusMissil()
@@ -2143,6 +2283,10 @@ local function modoRemoto()
           contato = ("base #%d"):format(id)
           if msg.tipo == "ping" then
             rednet.send(id, statusMissil(), PROTOCOLO)
+          elseif msg.tipo == "desafio" then
+            -- lancamento cifrado: numero unico, vale uma vez por 10 s
+            desafio = { nonce = cripto.hex(cripto.aleatorio(16)), id = id, ate = os.clock() + 10 }
+            rednet.send(id, { tipo = "desafio", nonce = desafio.nonce }, PROTOCOLO)
           elseif msg.tipo == "lancar" then
             local st = statusMissil()
             local a = type(msg.alvo) == "table" and msg.alvo or {}
@@ -2150,12 +2294,13 @@ local function modoRemoto()
             local negar
             if not st.pronto then
               negar = "Nao pronto: " .. table.concat(st.problemas, ", ")
-            elseif cfg.codigo ~= "" and msg.codigo ~= cfg.codigo then
-              negar = "Codigo de lancamento incorreto"
             elseif not (alvo.x and alvo.y and alvo.z) then
               negar = "Alvo invalido"
+            elseif cfg.codigo ~= "" and not codigoCerto(msg, id, alvo) then
+              negar = "Codigo de lancamento incorreto"
             end
             if negar then
+              contato = ("base #%d: NEGADO (%s)"):format(id, negar)
               rednet.send(id, { tipo = "lancar_negado", motivo = negar }, PROTOCOLO)
             else
               rednet.send(id, { tipo = "lancar_ok", nome = nomeRede() }, PROTOCOLO)
@@ -2272,6 +2417,7 @@ local GRUPOS = {
   { "Sistema", {
     { "_label", "Nome do missil" },
     { "codigo", "Codigo de lancamento" },
+    { "soCifrado", "So aceitar ordem cifrada" },
     { "iniciarRemoto", "Ligar ja em modo remoto" },
   } },
 }
