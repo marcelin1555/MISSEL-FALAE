@@ -160,3 +160,25 @@ v4.5-simetria (base v2.0)
   altura do alvo na confirmacao, telemetria com previsao de impacto e
   potencia dos solidos, e "Historico de voos" (ultimos 20, /bfm_voos.txt).
 Torres de GPS: iguais a v3.1.
+
+v4.6-rcs
+--------
+- RCS Thruster (Aero-Reformation) para empurrar o missil de lado no fim do
+  voo, sem precisar virar o nariz. O CC nao escolhe o bocal pelo periferico
+  "aero_rcs": o bocal dispara com a redstone (0-15 = forca) que entra na face
+  do Directional Synchronizer (Master) ao qual o RCS esta vinculado. O
+  computador manda essa redstone por um lado livre ou por Redstone Relay.
+- Montagem: 4 RCS na altura do centro de massa (N/S/L/O), cada um com o seu
+  Master, e um Redstone Relay (wired modem) encostado na face do Master que
+  faz o jato sair para fora do corpo.
+- Menu "Calibrar RCS": pulsa cada saida livre e o jogador diz para que lado
+  saiu o jato (N/S/L/O, C ignora, ENTER nada). Guarda a forca de cada canal.
+- Voo: no ATAQUE, com tempo ate o impacto <= "Ligar RCS a", a correcao de
+  lado da balistica (ZEM) vira redstone em cada canal conforme a direcao
+  da forca dele no mundo (orientacao do sublevel).
+- Ajustes: grupo "RCS (correcao final)": usar, forca de cada RCS (pN),
+  ganho (nivel 15 quando ganho x aceleracao pedida >= 1) e tempo.
+- Testes: "Teste RCS" empurra 1 s para N/S/L/O.
+- Checklist, tela ("R" = soma dos niveis), voo.csv (rcsX, rcsZ, rcsNivel)
+  e telemetria (rcs). desligarTudo zera o RCS.
+Base v2.0 e torres de GPS: iguais a v4.5.

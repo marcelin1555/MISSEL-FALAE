@@ -11,7 +11,7 @@ PROGRAMAS[#PROGRAMAS + 1] = { chave = "missil", arquivo = "missil.lua", titulo =
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "4.5"
+local VERSAO = "4.6"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -324,6 +324,9 @@ local PADRAO = {
   -- ogiva e seguranca
   ladoOgiva = "top", raioDetonacao = 4, tempoArme = 5, distArme = 30,
   tempoMax = 180, impacto = true,
+  -- RCS (Aero-Reformation): empurrao de lado no fim do voo
+  usarRcs = true, empuxoRcs = 4000, kRcs = 0.5, tempoRcs = 8,
+  canaisRcs = {}, -- calibracao: {dev, lado, fx, fz} = forca no referencial do lancamento
   -- sistema
   codigo = "", iniciarRemoto = false,
   alvoX = 0, alvoY = 64, alvoZ = 0,
@@ -333,7 +336,7 @@ local PADRAO = {
 local INTEIROS = {
   abortar = true, contagem = true, altCruzeiro = true, altSaida = true,
   distAtaque = true, alcanceMax = true, raioDetonacao = true,
-  tempoArme = true, distArme = true, tempoMax = true,
+  tempoArme = true, distArme = true, tempoMax = true, empuxoRcs = true, tempoRcs = true,
 }
 
 local cfg = {}
@@ -400,7 +403,7 @@ local TIPOS_MOTOR = {
   { tipo = "creative_thruster",   classe = "criativo", rotulo = "CRI" },
 }
 
-local P = { vetores = {}, motores = {} }
+local P = { vetores = {}, motores = {}, rcs = {}, relays = {} }
 
 local function temTipo(nome, lista)
   for _, t in ipairs(lista) do
@@ -410,7 +413,8 @@ local function temTipo(nome, lista)
 end
 
 local function detectar()
-  P = { gimbal = nil, drive = nil, modem = nil, altimetro = nil, vetores = {}, motores = {} }
+  P = { gimbal = nil, drive = nil, modem = nil, altimetro = nil, vetores = {}, motores = {},
+    rcs = {}, relays = {} }
   -- o GPS so usa modem sem fio encostado direto no computador
   for _, lado in ipairs(rs.getSides()) do
     if peripheral.hasType(lado, "modem") and peripheral.call(lado, "isWireless") then
@@ -425,6 +429,10 @@ local function detectar()
       P.altimetro = P.altimetro or peripheral.wrap(nome)
     elseif temTipo(nome, TIPOS_VETOR) then
       table.insert(P.vetores, { nome = nome, p = peripheral.wrap(nome) })
+    elseif peripheral.hasType(nome, "aero_rcs") then
+      table.insert(P.rcs, { nome = nome, p = peripheral.wrap(nome) })
+    elseif peripheral.hasType(nome, "redstone_relay") then
+      table.insert(P.relays, nome)
     elseif peripheral.hasType(nome, "drive") then
       P.drive = P.drive or peripheral.wrap(nome)
     else
@@ -508,10 +516,69 @@ local function vetorEmpuxo(pot)
   if #tarefas > 0 then parallel.waitForAll(table.unpack(tarefas)) end
 end
 
+-- RCS (Aero-Reformation): o CC nao escolhe o bocal pelo periferico. O bocal
+-- dispara com a redstone (0-15 = forca) que entra na face do Directional
+-- Synchronizer (Master) ao qual o RCS esta vinculado: saida do proprio
+-- computador ou de um Redstone Relay encostado no Master.
+local function candidatosRcs()
+  local lista = {}
+  if cfg.ladoOgiva ~= "todos" then
+    for _, lado in ipairs(rs.getSides()) do
+      if lado ~= cfg.ladoOgiva and lado ~= P.modem and not peripheral.isPresent(lado) then
+        table.insert(lista, { lado = lado })
+      end
+    end
+  end
+  for _, dev in ipairs(P.relays) do
+    for _, lado in ipairs(rs.getSides()) do
+      table.insert(lista, { dev = dev, lado = lado })
+    end
+  end
+  return lista
+end
+
+local function nomeCanal(c)
+  return (c.dev or "computador") .. ":" .. c.lado
+end
+
+local function tarefaSaida(tarefas, c, nivel)
+  table.insert(tarefas, function()
+    if c.dev then
+      pcall(peripheral.call, c.dev, "setAnalogOutput", c.lado, nivel)
+    else
+      pcall(redstone.setAnalogOutput, c.lado, nivel)
+    end
+  end)
+end
+
+local function executar(tarefas)
+  if #tarefas > 0 then parallel.waitForAll(table.unpack(tarefas)) end
+end
+
+local function rcsDesligar()
+  local tarefas = {}
+  for _, c in ipairs(cfg.canaisRcs) do tarefaSaida(tarefas, c, 0) end
+  executar(tarefas)
+end
+
+-- aplica a forca configurada em cada RCS; devolve quantos tem combustivel/energia
+local function rcsPreparar()
+  local tarefas, comComb = {}, 0
+  for _, r in ipairs(P.rcs) do
+    table.insert(tarefas, function()
+      pcall(r.p.setThrust, cfg.empuxoRcs)
+      if chamar(r.p, "hasFuel") then comComb = comComb + 1 end
+    end)
+  end
+  executar(tarefas)
+  return comComb
+end
+
 local function desligarTudo()
   for _, m in ipairs(P.motores) do acelerar(m, 0) end
   vetorComando(0, 0)
   vetorEmpuxo(0)
+  rcsDesligar()
 end
 
 -- texto do combustivel e se ainda tem
@@ -952,6 +1019,93 @@ local function calibrarMotores()
   aviso("GIRO SALVO", linhas, colors.lime)
 end
 
+---------------------------------------------------------------- CALIBRAR RCS
+
+-- lado do jato -> forca no missil {leste, sul}: jato para o norte empurra para o sul
+local JATO_FORCA = { N = { 0, 1 }, S = { 0, -1 }, L = { -1, 0 }, O = { 1, 0 } }
+
+local function calibrarRcs()
+  if not exigir(false) then return end
+  if not cfg.bocalOk then
+    aviso("RCS", { "Calibre o bocal antes." }, colors.orange)
+    return
+  end
+  local cand = candidatosRcs()
+  if #cand == 0 then
+    aviso("RCS", { "Nenhuma saida de redstone livre.",
+      "Encoste um Redstone Relay (wired modem) no Directional Synchronizer (Master) de cada RCS." },
+      colors.red)
+    return
+  end
+  rcsDesligar()
+
+  local novo = {}
+  for i, c in ipairs(cand) do
+    cabecalho(("RCS %d/%d"):format(i, #cand))
+    escrever(2, 3, "Pulsando a saida " .. nomeCanal(c), colors.yellow)
+    escrever(2, 4, "Algum RCS soltou jato? Para que lado?", colors.yellow)
+    escrever(2, 6, "N Norte   S Sul   L Leste   O Oeste")
+    escrever(2, 7, "C = jato para cima/baixo (ignorar)")
+    escrever(2, 8, "ENTER = nada disparou")
+    escrever(2, 10, "Missil na mesma posicao da calibracao!", colors.lightGray)
+    escrever(2, 11, ("RCS encontrados: %d   canais marcados: %d"):format(#P.rcs, #novo),
+      colors.lightGray)
+    rodape("N/S/L/O/C/ENTER escolhe   BACKSPACE cancela")
+
+    local escolha, cancelou
+    parallel.waitForAny(function()
+      local nivel = 15
+      while true do
+        local t = {}
+        tarefaSaida(t, c, nivel)
+        executar(t)
+        nivel = 15 - nivel
+        sleep(0.5)
+      end
+    end, function()
+      while true do
+        local ev, p = os.pullEvent()
+        if ev == "char" and (JATO_FORCA[p:upper()] or p:upper() == "C") then
+          escolha = p:upper()
+          return
+        elseif ev == "key" and p == keys.enter then
+          return
+        elseif ev == "key" and p == keys.backspace then
+          cancelou = true
+          return
+        end
+      end
+    end)
+    local t = {}
+    tarefaSaida(t, c, 0)
+    executar(t)
+    if cancelou then return end
+    local f = escolha and JATO_FORCA[escolha]
+    if f then table.insert(novo, { dev = c.dev, lado = c.lado, fx = f[1], fz = f[2] }) end
+  end
+
+  cfg.canaisRcs = novo
+  salvarConfig()
+  if #novo == 0 then
+    aviso("RCS", { "Nenhum canal marcado: o RCS fica desligado no voo." }, colors.orange)
+    return
+  end
+  local temNS, temLO, linhas = false, false, {}
+  for _, c in ipairs(novo) do
+    if c.fz ~= 0 then temNS = true end
+    if c.fx ~= 0 then temLO = true end
+    local lado = c.fz > 0 and "S" or c.fz < 0 and "N" or c.fx > 0 and "L" or "O"
+    table.insert(linhas, ("%-30s empurra p/ %s"):format(nomeCanal(c), lado))
+  end
+  table.insert(linhas, "")
+  if temNS and temLO then
+    table.insert(linhas, "Cobre norte/sul e leste/oeste.")
+  else
+    table.insert(linhas, "ATENCAO: falta RCS no eixo " .. (temNS and "leste/oeste." or "norte/sul."))
+  end
+  aviso("RCS SALVO", linhas, (temNS and temLO) and colors.lime or colors.orange)
+end
+
 ---------------------------------------------------------------- VOO
 
 local function desenharHorizonte(n, l, an, al)
@@ -1051,6 +1205,8 @@ local function voar(opts)
   for _, m in ipairs(P.motores) do
     if m.classe ~= "solido" or cfg.usarSolidos then table.insert(ativos, m) end
   end
+  local rcsAtivo = guiado and cfg.usarRcs and #cfg.canaisRcs > 0
+  local rcsComb = rcsAtivo and rcsPreparar() or 0
 
   -- checklist (so no lancamento local; a base ja confirmou)
   if not base then
@@ -1086,11 +1242,15 @@ local function voar(opts)
       giroBom = S.mapeados >= 2
     end
     item(13, "Freio de giro", giroTxt, giroBom)
+    if guiado and cfg.usarRcs then
+      item(14, "RCS canais/blocos/comb",("%d / %d / %d"):format(#cfg.canaisRcs, #P.rcs, rcsComb),
+        rcsAtivo and #P.rcs > 0 and rcsComb == #P.rcs)
+    end
     if #ativos == 0 then
-      escrever(2, 14, "Nenhum motor principal: so o vetor empurra.", colors.orange)
+      escrever(2, 15,"Nenhum motor principal: so o vetor empurra.", colors.orange)
     end
     if contar("solido") > 0 and cfg.usarSolidos then
-      escrever(2, 15, "Solidos NAO apagam depois de acesos!", colors.orange)
+      escrever(2, 16, "Solidos NAO apagam depois de acesos!", colors.orange)
     end
     rodape("ENTER lancar   BACKSPACE cancelar")
     while true do
@@ -1161,7 +1321,7 @@ local function voar(opts)
   if guiado then
     S.log = fs.open("/voo.csv", "w")
     if S.log then
-      S.log.writeLine("t,fase,modo,x,y,z,vx,vy,vz,fonteVel,narizX,narizY,narizZ,dirX,dirY,dirZ,erro,empuxo,g,bocalX,bocalY,hz,dist,giro,pedido,aMin,aMax,queda,tgo,solidos")
+      S.log.writeLine("t,fase,modo,x,y,z,vx,vy,vz,fonteVel,narizX,narizY,narizZ,dirX,dirY,dirZ,erro,empuxo,g,bocalX,bocalY,hz,dist,giro,pedido,aMin,aMax,queda,tgo,solidos,rcsX,rcsZ,rcsNivel")
     end
   end
   evento("IGNICAO")
@@ -1550,6 +1710,12 @@ local function voar(opts)
             local _, _, _, mo = normalizar(ox, oy, oz)
             local al = math.max(aMin + ap, aMin, mo / math.tan(math.rad(cfg.inclAtaque)))
             fx, fy, fz = al * wx + ox, al * wy + oy, al * wz + oz
+            -- fim do voo: o RCS empurra de lado junto com o nariz
+            if rcsAtivo and fase == "ATAQUE" and tgo <= cfg.tempoRcs then
+              S.rcsCmd = { ox, oy, oz }
+            else
+              S.rcsCmd = nil
+            end
           end
           local dx, dy, dz, f = normalizar(fx, fy, fz)
           if f > 0 then S.dirDes, S.pedido = { dx, dy, dz }, f end
@@ -1616,11 +1782,13 @@ local function voar(opts)
 
         if S.log then
           local nz, dd = S.nariz or { 0, 0, 0 }, S.dirDes or { 0, 0, 0 }
-          S.log.writeLine(("%.2f,%s,%s,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.0f,%.2f,%.2f,%.2f,%.1f,%.1f,%.2f")
+          local rc = S.rcsCmd or { 0, 0, 0 }
+          S.log.writeLine(("%.2f,%s,%s,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.0f,%.2f,%.2f,%.2f,%.1f,%.1f,%.2f,%.2f,%.2f,%d")
             :format(tv, S.fase, S.modoPose and "pose" or "gimbal", p.x, p.y, p.z, vl, vy, -vn,
               S.fonteVel or (P.altimetro and "altimetro" or "posicao"), nz[1], nz[2], nz[3],
               dd[1], dd[2], dd[3], S.errAng, S.empuxo or 0, S.gravidade, S.cx, S.cy, S.hz, dist, math.deg(S.wy),
-              S.pedido or 0, S.aMin or 0, S.aMax or 0, S.erroQueda or 0, S.tgo or 0, S.potSol or 0))
+              S.pedido or 0, S.aMin or 0, S.aMax or 0, S.erroQueda or 0, S.tgo or 0, S.potSol or 0,
+              rc[1], rc[3], S.rcsNivel or 0))
           if t - ultFlush >= 1 then
             S.log.flush()
             ultFlush = t
@@ -1738,8 +1906,8 @@ local function voar(opts)
       local x = 18
       escrever(x, 3, ("Incl.  N %5.1f  L %5.1f"):format(S.n, S.l))
       if S.modoPose then
-        escrever(x, 4, ("Erro%5.1f queda%5.0f sol%3d%%"):format(S.errAng, S.erroQueda or 0,
-          math.floor((S.potSol or 0) * 100 + 0.5)),
+        escrever(x, 4, ("Erro%5.1f queda%5.0f sol%3d%% R%2d"):format(S.errAng, S.erroQueda or 0,
+          math.floor((S.potSol or 0) * 100 + 0.5), S.rcsNivel or 0),
           S.fraco and colors.red or colors.cyan)
       else
         escrever(x, 4, ("Pedido N %5.1f  L %5.1f"):format(S.alvoN, S.alvoL), colors.cyan)
@@ -1798,10 +1966,39 @@ local function voar(opts)
           n = S.n, l = S.l, psi = math.deg(S.psi), hz = S.hz,
           acel = S.acel, empuxo = total, motores = motores,
           queda = S.erroQueda, tgo = S.tgo, sol = S.potSol, erro = S.errAng,
-          modo = S.modoPose and "apontamento" or "gimbal",
+          modo = S.modoPose and "apontamento" or "gimbal", rcs = S.rcsNivel,
         }, PROTOCOLO)
       end
       sleep(0.5)
+    end
+  end
+
+  -- TAREFA: RCS. A navegacao pede uma aceleracao de lado (S.rcsCmd, mundo) e
+  -- cada canal recebe redstone (0-15) conforme a sua forca aponta para esse lado.
+  local function tarefaRcs()
+    local ultimo = {}
+    while true do
+      sleep(0.1)
+      local cmd = S.rcsCmd
+      local q = cmd and sublevelOrientacao()
+      local tarefas, soma = {}, 0
+      for i, c in ipairs(cfg.canaisRcs) do
+        local nivel = 0
+        if q then
+          -- forca do canal: referencial do lancamento -> corpo -> mundo
+          local bx, by, bz = girar(conjugar(S.q0), c.fx, 0, c.fz)
+          local ux, uy, uz = girar(q, bx, by, bz)
+          local d = ux * cmd[1] + uy * cmd[2] + uz * cmd[3]
+          nivel = math.floor(15 * clamp(cfg.kRcs * d, 0, 1) + 0.5)
+        end
+        soma = soma + nivel
+        if nivel ~= ultimo[i] then
+          ultimo[i] = nivel
+          tarefaSaida(tarefas, c, nivel)
+        end
+      end
+      S.rcsNivel = soma
+      executar(tarefas)
     end
   end
 
@@ -1837,6 +2034,7 @@ local function voar(opts)
   local tarefas = { controle, telemetria, teclado }
   if guiado then table.insert(tarefas, navegacao) end
   if guiado and S.modoPose then table.insert(tarefas, gerenciarMotores) end
+  if rcsAtivo and S.modoPose then table.insert(tarefas, tarefaRcs) end
   if rednet.isOpen() then table.insert(tarefas, rede) end
 
   local ok, err = pcall(parallel.waitForAny, table.unpack(tarefas))
@@ -2088,6 +2286,12 @@ local GRUPOS = {
     { "navN", "Ganho da balistica (N)", 1, 8 },
     { "kGuia", "Ganho da guiagem", 0, 5 },
   } },
+  { "RCS (correcao final)", {
+    { "usarRcs", "Usar RCS no fim do voo" },
+    { "empuxoRcs", "Forca de cada RCS (pN)", 500, 20000 },
+    { "kRcs", "Ganho do RCS", 0, 5 },
+    { "tempoRcs", "Ligar RCS a (s do impacto)", 1, 60 },
+  } },
   { "Ogiva e seguranca", {
     { "ladoOgiva", "Lado da ogiva (redstone)" },
     { "raioDetonacao", "Raio de detonacao", 1, 20 },
@@ -2175,7 +2379,7 @@ local function ajustes()
       editarGrupo(GRUPOS[i])
     elseif confirmar("AJUSTES", "Restaurar todos os ajustes para o padrao?") then
       local manter = { "offX", "offZ", "eixoN", "sinalN", "eixoL", "sinalL", "gimbalOk",
-        "eixoX", "sinalX", "eixoY", "sinalY", "bocalOk", "posMotores", "conjugarQuat", "qCal", "subId", "nome",
+        "eixoX", "sinalX", "eixoY", "sinalY", "bocalOk", "posMotores", "conjugarQuat", "qCal", "subId", "nome", "canaisRcs",
         "iniciarRemoto" }
       local novo = copiar(PADRAO)
       for _, k in ipairs(manter) do novo[k] = cfg[k] end
@@ -2523,6 +2727,46 @@ local function testeOrientacao()
   parallel.waitForAny(tela, teclas)
 end
 
+-- dispara por 1 s os canais que empurram o missil para o lado escolhido
+local function testeRcs()
+  detectar()
+  if #cfg.canaisRcs == 0 then
+    aviso("TESTE RCS", { "Calibre o RCS antes." }, colors.orange)
+    return
+  end
+  local comComb = rcsPreparar()
+  local dirs = { N = { 0, -1 }, S = { 0, 1 }, L = { 1, 0 }, O = { -1, 0 } }
+  local msg, msgCor = "", colors.white
+  while true do
+    cabecalho("TESTE RCS")
+    escrever(2, 3, "Missil como na calibracao. Ele vai se mexer!", colors.yellow)
+    escrever(2, 5, "N/S/L/O empurra o missil 1 s para esse lado")
+    escrever(2, 7, ("RCS %d  comb %d  canais %d  %d pN"):format(#P.rcs, comComb,
+      #cfg.canaisRcs, cfg.empuxoRcs), colors.lightGray)
+    escrever(2, 9, msg, msgCor)
+    rodape("N/S/L/O dispara   BACKSPACE volta")
+    local ev, p = os.pullEvent()
+    if ev == "key" and p == keys.backspace then return end
+    local d = ev == "char" and dirs[p:upper()]
+    if d then
+      local liga, desliga, n = {}, {}, 0
+      for _, c in ipairs(cfg.canaisRcs) do
+        if c.fx * d[1] + c.fz * d[2] > 0.5 then
+          tarefaSaida(liga, c, 15)
+          tarefaSaida(desliga, c, 0)
+          n = n + 1
+        end
+      end
+      escrever(2, 9, ("Empurrando para %s com %d canais..."):format(p:upper(), n), colors.yellow)
+      executar(liga)
+      sleep(1)
+      executar(desliga)
+      msg = ("Ultimo: %s com %d canais"):format(p:upper(), n)
+      msgCor = n > 0 and colors.lime or colors.red
+    end
+  end
+end
+
 local function testes()
   while true do
     local i = menu("TESTES", {
@@ -2531,14 +2775,16 @@ local function testes()
       "Controle manual do bocal",
       "Teste da ogiva (use lampada!)",
       "Teste de orientacao (sublevel)",
+      "Teste RCS (empurrar N/S/L/O)",
       "Voltar",
     })
-    if not i or i == 6 then return end
+    if not i or i == 7 then return end
     if i == 1 then painel()
     elseif i == 2 then testeGps()
     elseif i == 3 then bocalManual()
     elseif i == 4 then testeOgiva()
-    elseif i == 5 then testeOrientacao() end
+    elseif i == 5 then testeOrientacao()
+    elseif i == 6 then testeRcs() end
     desligarTudo()
     ogiva(false)
   end
@@ -2550,15 +2796,16 @@ local function principal()
   while true do
     detectar()
     abrirRede()
-    local extra = contar("criativo") > 0 and ("  Cri " .. contar("criativo")) or ""
+    local extra = (contar("criativo") > 0 and ("  Cri " .. contar("criativo")) or "")
+      .. (#P.rcs > 0 and ("  RCS " .. #P.rcs) or "")
     local _, noDisco = localPresets()
     local info = {
       { ("Gimbal %s  Vetor %d  Liq %d  Sol %d  Ion %d%s"):format(
           P.gimbal and "OK" or "--", #P.vetores, contar("liquido"),
           contar("solido"), contar("ion"), extra), colors.lightGray },
-      { ("Calib: gimbal %s  bocal %s  giro %d/%d"):format(
-          cfg.gimbalOk and "OK" or "PENDENTE", cfg.bocalOk and "OK" or "PENDENTE",
-          motoresMapeados(), #P.vetores),
+      { ("Calib: gimbal %s  bocal %s  giro %d/%d  rcs %d"):format(
+          cfg.gimbalOk and "OK" or "PEND.", cfg.bocalOk and "OK" or "PEND.",
+          motoresMapeados(), #P.vetores, #cfg.canaisRcs),
         (cfg.gimbalOk and cfg.bocalOk) and colors.lime or colors.orange },
       { ("Rede: %s  %s"):format(nomeRede(), P.modem and "(modem OK)" or "(SEM MODEM)"),
         P.modem and colors.lightGray or colors.orange },
@@ -2567,7 +2814,7 @@ local function principal()
     }
     local acoes = {
       modoRemoto, lancarLocal, voar, calibrarGimbal, calibrarBocal,
-      calibrarMotores, ajustes, presets, testes,
+      calibrarMotores, calibrarRcs, ajustes, presets, testes,
     }
     local i = menu("MISSIL v" .. VERSAO, {
       "Modo remoto (aguardar base)",
@@ -2576,12 +2823,13 @@ local function principal()
       "Calibrar gimbal",
       "Calibrar bocal",
       "Calibrar giro (lado dos motores)",
+      "Calibrar RCS (correcao lateral)",
       "Ajustes",
       "Presets (disquete)",
       "Testes",
       "Sair",
     }, info)
-    if not i or i == 10 then return end
+    if not i or i == 11 then return end
 
     local ok, err = pcall(acoes[i])
     detectar()
