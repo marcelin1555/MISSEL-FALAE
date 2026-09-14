@@ -4,7 +4,7 @@
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "4.8"
+local VERSAO = "4.9"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -316,10 +316,11 @@ local PADRAO = {
   taxaVirar = 25, inclAtaque = 45, navN = 3, kGuia = 0.5,
   -- ogiva e seguranca
   ladoOgiva = "top", raioDetonacao = 4, tempoArme = 5, distArme = 30,
-  tempoMax = 180, impacto = true,
-  -- RCS (Aero-Reformation) guiados pela Guidance Warhead no fim do voo
-  usarRcs = true, empuxoRcs = 2000, ladoRcs = 0.04, tempoRcs = 8,
-  canalRcs = {}, -- saida de redstone que liga a guiagem dos RCS: {dev, lado}
+  altDeton = 3, tempoMax = 180, impacto = true,
+  -- RCS: motores solidos (Create Propulsion) no cone, para apontar o missil na
+  -- QUEDA, quando os motores principais e os vector thrusters estao desligados.
+  usarRcs = true, kRcs = 0.8,
+  rcsMotores = {}, -- nome do motor solido -> lado (N/S/L/O) que ele inclina o nariz
   -- sistema
   codigo = "", soCifrado = true, iniciarRemoto = false,
   alvoX = 0, alvoY = 64, alvoZ = 0,
@@ -329,7 +330,7 @@ local PADRAO = {
 local INTEIROS = {
   abortar = true, contagem = true, altCruzeiro = true, altSaida = true,
   distAtaque = true, alcanceMax = true, raioDetonacao = true,
-  tempoArme = true, distArme = true, tempoMax = true, empuxoRcs = true, tempoRcs = true,
+  tempoArme = true, distArme = true, tempoMax = true, altDeton = true,
 }
 
 local cfg = {}
@@ -534,7 +535,7 @@ end
 
 local function detectar()
   P = { gimbal = nil, drive = nil, modem = nil, altimetro = nil, vetores = {}, motores = {},
-    rcs = {}, relays = {}, warhead = nil }
+    rcs = {}, relays = {} }
   -- o GPS so usa modem sem fio encostado direto no computador
   for _, lado in ipairs(rs.getSides()) do
     if peripheral.hasType(lado, "modem") and peripheral.call(lado, "isWireless") then
@@ -549,10 +550,6 @@ local function detectar()
       P.altimetro = P.altimetro or peripheral.wrap(nome)
     elseif temTipo(nome, TIPOS_VETOR) then
       table.insert(P.vetores, { nome = nome, p = peripheral.wrap(nome) })
-    elseif peripheral.hasType(nome, "aero_warhead") then
-      P.warhead = P.warhead or peripheral.wrap(nome)
-    elseif peripheral.hasType(nome, "aero_rcs") then
-      table.insert(P.rcs, { nome = nome, p = peripheral.wrap(nome) })
     elseif peripheral.hasType(nome, "redstone_relay") then
       table.insert(P.relays, nome)
     elseif peripheral.hasType(nome, "drive") then
@@ -567,6 +564,19 @@ local function detectar()
       end
     end
   end
+  -- separa os motores solidos marcados como RCS (no cone): saem da lista de
+  -- propulsao e ganham a direcao {tn, tl} para onde inclinam o nariz.
+  local principais = {}
+  for _, m in ipairs(P.motores) do
+    local lado = m.classe == "solido" and cfg.rcsMotores[m.nome]
+    local d = lado and LADO_VETOR[lado]
+    if d and (d[1] ~= 0 or d[2] ~= 0) then
+      table.insert(P.rcs, { nome = m.nome, m = m, tn = d[1], tl = d[2] })
+    else
+      table.insert(principais, m)
+    end
+  end
+  P.motores = principais
 end
 
 local function contar(classe)
@@ -638,71 +648,40 @@ local function vetorEmpuxo(pot)
   if #tarefas > 0 then parallel.waitForAll(table.unpack(tarefas)) end
 end
 
--- RCS (Aero-Reformation) vinculados a uma Guidance Warhead: ela faz o PID e
--- escolhe os bocais. A guiagem liga com redstone no bloco onde cada RCS esta
--- preso; o computador manda essa redstone por um lado livre ou Redstone Relay.
-local function candidatosRcs()
-  local lista = {}
-  if cfg.ladoOgiva ~= "todos" then
-    for _, lado in ipairs(rs.getSides()) do
-      if lado ~= cfg.ladoOgiva and lado ~= P.modem and not peripheral.isPresent(lado) then
-        table.insert(lista, { lado = lado })
-      end
-    end
-  end
-  for _, dev in ipairs(P.relays) do
-    for _, lado in ipairs(rs.getSides()) do
-      table.insert(lista, { dev = dev, lado = lado })
-    end
-  end
-  return lista
-end
-
-local function nomeCanal(c)
-  return (c.dev or "computador") .. ":" .. c.lado
-end
-
-local function saidaRcs(c, ligar)
-  if not c or not c.lado then return end
-  if c.dev then
-    pcall(peripheral.call, c.dev, "setOutput", c.lado, ligar)
-  else
-    pcall(redstone.setOutput, c.lado, ligar)
-  end
-end
+-- RCS: motores solidos (Create Propulsion) montados no cone, apontando para fora.
+-- Disparar um empurra o missil pelo lado oposto e INCLINA o nariz para o lado {tn, tl}
+-- (mapeado na calibracao). Como sao motores comuns, o computador os liga direto com
+-- setPowerNormalized -- sem warhead nem redstone. Servem para apontar o missil na
+-- QUEDA, quando os motores principais e os vector thrusters estao desligados (sem
+-- empuxo saindo, o vector thruster nao consegue mais virar o missil).
 
 local function rcsDesligar()
-  saidaRcs(cfg.canalRcs, false)
+  for _, e in ipairs(P.rcs) do acelerar(e.m, 0) end
 end
 
--- alvo manual, sem subida ate cruiseAltitude (Y do mundo) e sem o freio da warhead:
--- ligada, ela tira velocidade * empuxo / (800 * maxSpeed) por tick, entao maxSpeed alto
-local function warheadPreparar(alvo, empuxo, lado)
-  local w = P.warhead
-  if not w then return false end
-  pcall(w.setSearchMode, 2)
-  pcall(w.setGuidanceMode, 0)
-  pcall(w.setManualTarget, alvo.x, alvo.y, alvo.z)
-  local ajustes = { cruiseAltitude = 0, altitudeOffset = 0, maxSpeed = 100000,
-    maxThrustPN = empuxo, sidePower = lado }
-  for chave, v in pairs(ajustes) do pcall(w.setTuning, chave, v) end
-  return true
+-- comando de atitude (cN, cL em -1..1 = inclinar o nariz para +Norte / +Leste):
+-- cada RCS recebe potencia proporcional a quanto ele empurra nessa direcao.
+-- Devolve a soma das potencias (0 = parado).
+local function rcsAtitude(cN, cL)
+  local tarefas, soma = {}, 0
+  for _, e in ipairs(P.rcs) do
+    local pot = clamp(cfg.kRcs * (cN * e.tn + cL * e.tl), 0, 1)
+    soma = soma + pot
+    table.insert(tarefas, function() acelerar(e.m, pot) end)
+  end
+  if #tarefas > 0 then parallel.waitForAll(table.unpack(tarefas)) end
+  return soma
 end
 
+-- quantos RCS ainda tem combustivel (motor solido carregado ou queimando)
 local function rcsComCombustivel()
   local n = 0
-  for _, r in ipairs(P.rcs) do
-    if chamar(r.p, "hasFuel") then n = n + 1 end
+  for _, e in ipairs(P.rcs) do
+    if (chamar(e.m.p, "getFuelAmount") or 0) > 0 or chamar(e.m.p, "isBurning") == true then
+      n = n + 1
+    end
   end
   return n
-end
-
--- algum RCS com bocal ativo = a guiagem da warhead ligou
-local function rcsAtivos()
-  for _, r in ipairs(P.rcs) do
-    if (chamar(r.p, "getActiveNozzleMask") or 0) > 0 then return true end
-  end
-  return false
 end
 
 local function desligarTudo()
@@ -1153,74 +1132,90 @@ end
 
 ---------------------------------------------------------------- CALIBRAR RCS
 
--- descobre a saida de redstone que liga a guiagem: liga cada saida livre com
--- empuxo zero e ve se algum RCS ativou bocal
+-- Marca quais motores solidos sao RCS do cone e para que lado cada um inclina o
+-- nariz. Pulsa cada motor solido; o jogador ve para onde o NARIZ inclinou.
 local function calibrarRcs()
-  detectar()
-  if not P.warhead then
-    aviso("RCS", { "Guidance Warhead nao encontrada.",
-      "Ligue a warhead ao computador por wired modem e clique no modem para ativar." }, colors.red)
+  if not exigir(false) then return end
+  if not cfg.bocalOk then
+    aviso("RCS", { "Calibre o bocal antes." }, colors.orange)
     return
   end
-  if #P.rcs == 0 then
-    aviso("RCS", { "Nenhum RCS encontrado.",
-      "Ligue os RCS ao computador por wired modem para ler o estado deles." }, colors.red)
+  -- candidatos: todos os motores solidos (os ja marcados como RCS voltam para a lista)
+  local solidos = {}
+  for _, m in ipairs(P.motores) do
+    if m.classe == "solido" then table.insert(solidos, m) end
+  end
+  for _, e in ipairs(P.rcs) do table.insert(solidos, e.m) end
+  if #solidos == 0 then
+    aviso("RCS", { "Nenhum motor solido encontrado.",
+      "Os RCS sao motores solidos montados no cone, apontando para fora." }, colors.orange)
     return
   end
-  local p = sublevelPose() or posicao(1)
-  if not p then
-    aviso("RCS", { "Sem posicao (sublevel/GPS): a warhead precisa de um alvo." }, colors.red)
-    return
-  end
-  local cand = candidatosRcs()
-  if #cand == 0 then
-    aviso("RCS", { "Nenhuma saida de redstone livre.",
-      "Encoste um Redstone Relay (wired modem) no bloco onde os RCS estao presos." }, colors.red)
-    return
-  end
-  rcsDesligar()
-  -- alvo acima e empuxo zero: a guiagem ativa os bocais sem empurrar
-  warheadPreparar({ x = p.x, y = p.y + 200, z = p.z }, 0, 0)
+  for _, m in ipairs(solidos) do acelerar(m, 0) end
 
-  local achado
-  for i, c in ipairs(cand) do
-    cabecalho(("RCS %d/%d"):format(i, #cand))
-    escrever(2, 3, "Testando a saida " .. nomeCanal(c), colors.yellow)
-    escrever(2, 5, "Empuxo zero: o missil nao deve se mexer.", colors.lightGray)
-    rodape("BACKSPACE cancela")
-    saidaRcs(c, true)
-    local ativo, cancelou = false, false
+  local novo = {}
+  for i, m in ipairs(solidos) do
+    cabecalho(("RCS %d/%d"):format(i, #solidos))
+    escrever(2, 3, "Um motor solido vai PULSAR agora.", colors.yellow)
+    escrever(2, 4, "Para que lado o NARIZ inclinou?", colors.yellow)
+    escrever(2, 6, "N Norte   S Sul   L Leste   O Oeste")
+    escrever(2, 7, "C ou ENTER = nao e RCS (motor principal)")
+    escrever(2, 9, "Missil na mesma posicao da calibracao!", colors.lightGray)
+    escrever(2, 10, "Motor: " .. m.nome, colors.lightGray)
+    escrever(2, 11, ("Marcados ate agora: %d"):format((function()
+      local n = 0 for _ in pairs(novo) do n = n + 1 end return n end)()), colors.lightGray)
+    rodape("N/S/L/O escolhe   C/ENTER pula   BACKSPACE cancela")
+
+    local escolha, cancelou
     parallel.waitForAny(function()
-      sleep(0.6)
-      ativo = rcsAtivos()
+      local ligado = true
+      while true do
+        acelerar(m, ligado and 1 or 0)
+        ligado = not ligado
+        sleep(0.4)
+      end
     end, function()
       while true do
-        local _, k = os.pullEvent("key")
-        if k == keys.backspace then
+        local ev, p = os.pullEvent()
+        if ev == "char" and LADO_VETOR[p:upper()] and p:upper() ~= "C" then
+          escolha = p:upper()
+          return
+        elseif ev == "char" and p:upper() == "C" then
+          return
+        elseif ev == "key" and p == keys.enter then
+          return
+        elseif ev == "key" and p == keys.backspace then
           cancelou = true
           return
         end
       end
     end)
-    saidaRcs(c, false)
+    acelerar(m, 0)
     if cancelou then return end
-    if ativo then
-      achado = c
-      break
-    end
+    if escolha then novo[m.nome] = escolha end
   end
 
-  if not achado then
-    aviso("RCS", { "Nenhuma saida ligou a guiagem. Confira:",
-      "- RCS vinculados: clique na warhead com o ITEM do RCS antes de colocar",
-      "- Redstone Relay encostado no bloco onde os RCS estao presos",
-      "- RCS com combustivel/energia e o missil montado (sublevel)" }, colors.orange)
+  cfg.rcsMotores = novo
+  salvarConfig()
+  detectar()
+  local linhas, temNS, temLO = {}, false, false
+  for nome, lado in pairs(novo) do
+    if lado == "N" or lado == "S" then temNS = true end
+    if lado == "L" or lado == "O" then temLO = true end
+    table.insert(linhas, ("%-26s inclina p/ %s"):format(nome:sub(1, 26), lado))
+  end
+  if #linhas == 0 then
+    aviso("RCS", { "Nenhum motor marcado: o RCS fica desligado no voo.",
+      "Sem RCS, o missil nao consegue apontar na queda." }, colors.orange)
     return
   end
-  cfg.canalRcs = { dev = achado.dev, lado = achado.lado }
-  salvarConfig()
-  aviso("RCS SALVO", { "A guiagem dos RCS liga pela saida " .. nomeCanal(achado),
-    ("RCS: %d   com combustivel: %d"):format(#P.rcs, rcsComCombustivel()) }, colors.lime)
+  table.insert(linhas, "")
+  if temNS and temLO then
+    table.insert(linhas, "Cobre os dois eixos. Pronto para a queda guiada.")
+  else
+    table.insert(linhas, "ATENCAO: falta RCS no eixo " .. (temNS and "leste/oeste." or "norte/sul."))
+  end
+  aviso("RCS SALVO", linhas, (temNS and temLO) and colors.lime or colors.orange)
 end
 
 ---------------------------------------------------------------- VOO
@@ -1322,12 +1317,9 @@ local function voar(opts)
   for _, m in ipairs(P.motores) do
     if m.classe ~= "solido" or cfg.usarSolidos then table.insert(ativos, m) end
   end
-  local rcsAtivo = guiado and cfg.usarRcs and P.warhead ~= nil and cfg.canalRcs.lado ~= nil
+  local rcsAtivo = guiado and cfg.usarRcs and #P.rcs > 0
   local rcsComb = rcsAtivo and rcsComCombustivel() or 0
-  if rcsAtivo then
-    rcsDesligar()
-    warheadPreparar(alvo, cfg.empuxoRcs, cfg.ladoRcs)
-  end
+  rcsDesligar()
 
   -- checklist (so no lancamento local; a base ja confirmou)
   if not base then
@@ -1364,9 +1356,8 @@ local function voar(opts)
     end
     item(13, "Freio de giro", giroTxt, giroBom)
     if guiado and cfg.usarRcs then
-      item(14, "RCS warhead/RCS/comb", ("%s / %d / %d"):format(P.warhead and "OK" or "--",
-        #P.rcs, rcsComb),
-        rcsAtivo and #P.rcs > 0 and rcsComb == #P.rcs)
+      item(14, "RCS cone / comb", ("%d / %d"):format(#P.rcs, rcsComb),
+        rcsAtivo and rcsComb == #P.rcs)
     end
     if #ativos == 0 then
       escrever(2, 15,"Nenhum motor principal: so o vetor empurra.", colors.orange)
@@ -1646,6 +1637,22 @@ local function voar(opts)
         envio = { cx, cy, g }
       end
 
+      -- RCS do cone: na QUEDA os motores e os vetores estao desligados, entao
+      -- a atitude (apontar o nariz) vem dos motores solidos do cone. Comando na
+      -- mesma escala do bocal, no referencial Norte/Leste (sem o sinal do bocal).
+      if S.rcsAtit and modoPose and ang and #P.rcs > 0 then
+        local function pidNL(e, dr)
+          if cfg.kd > 0 then
+            return -(cfg.kd * (dr + clamp(cfg.kp / cfg.kd * e, -cfg.taxaVirar, cfg.taxaVirar)))
+          end
+          return -(cfg.kp * e)
+        end
+        S.rcsNivel = rcsAtitude(lim1(pidNL(ang[1], rnF)), lim1(pidNL(ang[2], rlF)))
+      elseif not S.rcsAtit and S.rcsNivel then
+        rcsDesligar()
+        S.rcsNivel = nil
+      end
+
       S.n, S.l, S.cx, S.cy = n, l, cx, cy
       S.giro = math.max(math.abs(rnF), math.abs(rlF))
       ciclos = ciclos + 1
@@ -1754,9 +1761,20 @@ local function voar(opts)
 
         -- espoleta
         if S.armado then
-          -- menor distancia ao alvo no trecho desde a ultima leitura: acerta mesmo
-          -- rapido demais para cair dentro do raio numa leitura
+          -- GATILHO PRINCIPAL: cruzou a altura de detonacao acima do alvo descendo.
+          -- E o momento em que a ogiva SABE que esta em cima do alvo. Interpola o
+          -- ponto exato entre as duas leituras para pegar o erro horizontal ali.
           local a0 = S.posAnt or p
+          local hDet = alvo.y + cfg.altDeton
+          if vy < 0 and a0.y > hDet and p.y <= hDet and a0.y > p.y then
+            local fr = (a0.y - hDet) / (a0.y - p.y)
+            local px = a0.x + (p.x - a0.x) * fr
+            local pz = a0.z + (p.z - a0.z) * fr
+            detonar(("altura %d (erro %.1f b)"):format(cfg.altDeton, mag(alvo.x - px, alvo.z - pz)))
+            return
+          end
+          -- reserva: menor distancia ao alvo no trecho desde a ultima leitura
+          -- (acerta mesmo rapido demais para cair dentro do raio numa leitura)
           local sx, sy, sz = p.x - a0.x, p.y - a0.y, p.z - a0.z
           local s2 = sx * sx + sy * sy + sz * sz
           local k = s2 > 0 and clamp(((alvo.x - a0.x) * sx + (alvo.y - a0.y) * sy + (alvo.z - a0.z) * sz) / s2, 0, 1) or 0
@@ -1777,13 +1795,23 @@ local function voar(opts)
           local fase = S.fase
           if fase == "DECOLAGEM" and p.y - o.y >= cfg.altSaida then fase = "SUBIDA" end
           if fase == "SUBIDA" and p.y >= S.cruzeiroY - 3 then fase = "CRUZEIRO" end
-          if fase == "CRUZEIRO" and vy < -1 then fase = "ATAQUE" end
+          -- CRUZEIRO -> QUEDA quando comeca a descer: aqui os motores principais
+          -- e os vector thrusters sao CORTADOS e o missil cai balistico, apontado
+          -- pelos RCS do cone e corrigido so com pulsos curtos de motor.
+          if fase == "CRUZEIRO" and vy < -1 then fase = "QUEDA" end
           if fase ~= S.fase then
             S.fase = fase
             evento("FASE: " .. fase)
+            if fase == "QUEDA" and rcsAtivo then
+              S.rcsAtit = true
+              evento("MOTORES CORTADOS: RCS no comando")
+            end
           end
+          -- so corta os motores (queda balistica) se houver RCS para apontar o
+          -- missil; sem RCS, mantem a guiagem com empuxo como antes (nao tomba).
+          local coast = fase == "QUEDA" and rcsAtivo
 
-          if S.aMax and fase ~= "DECOLAGEM" then
+          if S.aMax and fase ~= "DECOLAGEM" and not coast then
             if not S.fraco and S.aMax < S.gravidade then
               S.fraco = true
               evento(("EMPUXO INSUFICIENTE: %.1f < gravidade %.1f"):format(S.aMax, S.gravidade))
@@ -1798,9 +1826,10 @@ local function voar(opts)
             -- sobe reto na velocidade de subida, freando o que escorregar de lado
             fx, fy, fz = -cfg.kGuia * vx, math.max(g + cfg.kGuia * (cfg.velSubida - vy), 0.5 * g), -cfg.kGuia * vz
           else
-            -- BALISTICA: simula o voo daqui em diante com o nariz na velocidade e o
-            -- empuxo minimo, ate cruzar a altura do alvo (tgo = tempo ate la)
-            local aMin = S.aMin or 0
+            -- BALISTICA (CRUZEIRO/QUEDA): simula o voo daqui em diante com o nariz na
+            -- velocidade ate cruzar a altura do alvo. Na QUEDA os motores estao cortados,
+            -- entao a simulacao usa empuxo zero (queda livre pura) e assim ve o erro real.
+            local aMin = coast and 0 or (S.aMin or 0)
             local qx, qy, qz, ux, uy, uz, tgo = p.x, p.y, p.z, vx, vy, vz, 0
             while tgo < 90 and not (uy < 0 and qy <= alvo.y) do
               local _, _, _, su = normalizar(ux, uy, uz)
@@ -1811,42 +1840,38 @@ local function voar(opts)
               tgo = tgo + 0.1
             end
             if uy < 0 and qy <= alvo.y then
-              -- volta o pedaco do ultimo passo que passou da altura do alvo
               local tr = (qy - alvo.y) / uy
               qx, qz, tgo = qx - ux * tr, qz - uz * tr, tgo - tr
             else
-              -- nao desce ate o alvo (empuxo minimo segura o missil): mira direto nele
               qx, qz, tgo = p.x, p.z, math.max(dist / math.max(sp, 5), 2)
             end
             -- erro de queda (ZEM): quanto erra se nao corrigir mais nada.
-            -- Correcao otima para tempo tgo: navN * erro / tgo^2
             local zx, zz = alvo.x - qx, alvo.z - qz
             S.erroQueda, S.tgo = mag(zx, zz), tgo
             local c = cfg.navN / math.max(tgo, 1) ^ 2
             local wx, wy, wz = vx / math.max(sp, 1e-6), vy / math.max(sp, 1e-6), vz / math.max(sp, 1e-6)
             if sp < 1 then wx, wy, wz = 0, 1, 0 end
-            -- ao longo da velocidade so acelera (nao da para frear); de lado vira o
-            -- nariz, no maximo inclAtaque graus: pede mais empuxo se precisar
             local ap = (zx * wx + zz * wz) * c
             local ox, oy, oz = zx * c - ap * wx, -ap * wy, zz * c - ap * wz
             local _, _, _, mo = normalizar(ox, oy, oz)
             local al = math.max(aMin + ap, aMin, mo / math.tan(math.rad(cfg.inclAtaque)))
             fx, fy, fz = al * wx + ox, al * wy + oy, al * wz + oz
-            -- fim do voo: liga a Guidance Warhead, que vira o missil direto para o
-            -- alvo com os RCS. O nariz passa a mirar o mesmo ponto para nao brigar com ela.
-            if rcsAtivo and not S.rcsLigado and fase == "ATAQUE" and tgo <= cfg.tempoRcs then
-              S.rcsLigado = true
-              saidaRcs(cfg.canalRcs, true)
-              evento("RCS LIGADO (Guidance Warhead)")
-            end
-            if S.rcsLigado then
-              local tx, ty, tz = normalizar(alvo.x - p.x, alvo.y - p.y, alvo.z - p.z)
-              local _, _, _, fm = normalizar(fx, fy, fz)
-              fx, fy, fz = tx * fm, ty * fm, tz * fm
+            if coast then
+              -- QUEDA: aponta o nariz para corrigir e so PULSA o motor quando o erro
+              -- previsto vale a pena e ainda ha tempo. Sem pulso, empuxo pedido = 0
+              -- (motores desligados); o RCS mantem o nariz apontado.
+              S.pedido = (S.erroQueda > cfg.raioDetonacao and tgo > 2) and al or 0
+              local dx, dy, dz = normalizar(fx, fy, fz)
+              S.dirDes = { dx, dy, dz }
+            else
+              local dx, dy, dz, f = normalizar(fx, fy, fz)
+              if f > 0 then S.dirDes, S.pedido = { dx, dy, dz }, f end
             end
           end
-          local dx, dy, dz, f = normalizar(fx, fy, fz)
-          if f > 0 then S.dirDes, S.pedido = { dx, dy, dz }, f end
+          if fase == "DECOLAGEM" or fase == "SUBIDA" then
+            local dx, dy, dz, f = normalizar(fx, fy, fz)
+            if f > 0 then S.dirDes, S.pedido = { dx, dy, dz }, f end
+          end
         else
           -- fases
           local fase = S.fase
@@ -1910,12 +1935,12 @@ local function voar(opts)
 
         if S.log then
           local nz, dd = S.nariz or { 0, 0, 0 }, S.dirDes or { 0, 0, 0 }
-          S.log.writeLine(("%.2f,%s,%s,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.0f,%.2f,%.2f,%.2f,%.1f,%.1f,%.2f,%d")
+          S.log.writeLine(("%.2f,%s,%s,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.0f,%.2f,%.2f,%.2f,%.1f,%.1f,%.2f,%.2f")
             :format(tv, S.fase, S.modoPose and "pose" or "gimbal", p.x, p.y, p.z, vl, vy, -vn,
               S.fonteVel or (P.altimetro and "altimetro" or "posicao"), nz[1], nz[2], nz[3],
               dd[1], dd[2], dd[3], S.errAng, S.empuxo or 0, S.gravidade, S.cx, S.cy, S.hz, dist, math.deg(S.wy),
               S.pedido or 0, S.aMin or 0, S.aMax or 0, S.erroQueda or 0, S.tgo or 0, S.potSol or 0,
-              S.rcsLigado and 1 or 0))
+              S.rcsAtit and (S.rcsNivel or 0) or 0))
           if t - ultFlush >= 1 then
             S.log.flush()
             ultFlush = t
@@ -1931,7 +1956,7 @@ local function voar(opts)
   -- em todos do grupo (um motor sozinho desequilibra o missil).
   -- Com todos eles desligados, baixa os vector thrusters ate empuxoMin.
   local function gerenciarMotores()
-    local vMin, vMax = math.min(cfg.empuxoMin, cfg.empuxoVetor), cfg.empuxoVetor
+    local vMinBase, vMax = math.min(cfg.empuxoMin, cfg.empuxoVetor), cfg.empuxoVetor
     local vPot, ultV, meta = vMax, vMax, nil
     local lista = {}
     for _, m in ipairs(ativos) do
@@ -1939,6 +1964,9 @@ local function voar(opts)
     end
     while true do
       sleep(0.2)
+      -- na QUEDA sem pulso de correcao, o piso do vetor cai a zero: o missil
+      -- desce balistico e so os RCS do cone o mantem apontado.
+      local vMin = (S.coast and (S.pedido or 0) <= 0) and 0 or vMinBase
       local leituras = {}
       for _, e in ipairs(lista) do
         table.insert(leituras, function() e.kn = empuxoKN(e.m) end)
@@ -2034,7 +2062,7 @@ local function voar(opts)
       escrever(x, 3, ("Incl.  N %5.1f  L %5.1f"):format(S.n, S.l))
       if S.modoPose then
         escrever(x, 4, ("Erro%5.1f queda%5.0f sol%3d%% %s"):format(S.errAng, S.erroQueda or 0,
-          math.floor((S.potSol or 0) * 100 + 0.5), S.rcsLigado and "RCS" or ""),
+          math.floor((S.potSol or 0) * 100 + 0.5), S.rcsAtit and "RCS" or ""),
           S.fraco and colors.red or colors.cyan)
       else
         escrever(x, 4, ("Pedido N %5.1f  L %5.1f"):format(S.alvoN, S.alvoL), colors.cyan)
@@ -2093,7 +2121,7 @@ local function voar(opts)
           n = S.n, l = S.l, psi = math.deg(S.psi), hz = S.hz,
           acel = S.acel, empuxo = total, motores = motores,
           queda = S.erroQueda, tgo = S.tgo, sol = S.potSol, erro = S.errAng,
-          modo = S.modoPose and "apontamento" or "gimbal", rcs = S.rcsLigado and 1 or 0,
+          modo = S.modoPose and "apontamento" or "gimbal", rcs = S.rcsAtit and (S.rcsNivel or 0) or -1,
         }, PROTOCOLO)
       end
       sleep(0.5)
@@ -2400,14 +2428,13 @@ local GRUPOS = {
     { "navN", "Ganho da balistica (N)", 1, 8 },
     { "kGuia", "Ganho da guiagem", 0, 5 },
   } },
-  { "RCS (Guidance Warhead)", {
-    { "usarRcs", "Usar RCS no fim do voo" },
-    { "empuxoRcs", "RCS empuxo p/ frente (pN)", 0, 20000 },
-    { "ladoRcs", "RCS forca de virar (0-1)", 0, 1 },
-    { "tempoRcs", "Ligar RCS a (s do impacto)", 1, 60 },
+  { "RCS (motores no cone)", {
+    { "usarRcs", "Usar RCS na queda" },
+    { "kRcs", "Forca do RCS (ganho)", 0, 3 },
   } },
   { "Ogiva e seguranca", {
     { "ladoOgiva", "Lado da ogiva (redstone)" },
+    { "altDeton", "Detonar a (altura do alvo)", 0, 60 },
     { "raioDetonacao", "Raio de detonacao", 1, 20 },
     { "tempoArme", "Armar apos (segundos)", 0, 60 },
     { "distArme", "Armar a (blocos da base)", 0, 500 },
@@ -2494,7 +2521,7 @@ local function ajustes()
       editarGrupo(GRUPOS[i])
     elseif confirmar("AJUSTES", "Restaurar todos os ajustes para o padrao?") then
       local manter = { "offX", "offZ", "eixoN", "sinalN", "eixoL", "sinalL", "gimbalOk",
-        "eixoX", "sinalX", "eixoY", "sinalY", "bocalOk", "posMotores", "conjugarQuat", "qCal", "subId", "nome", "canalRcs",
+        "eixoX", "sinalX", "eixoY", "sinalY", "bocalOk", "posMotores", "conjugarQuat", "qCal", "subId", "nome", "rcsMotores",
         "iniciarRemoto" }
       local novo = copiar(PADRAO)
       for _, k in ipairs(manter) do novo[k] = cfg[k] end
@@ -2842,42 +2869,33 @@ local function testeOrientacao()
   parallel.waitForAny(tela, teclas)
 end
 
--- liga a guiagem 2 s mirando 100 blocos para o lado escolhido (e 100 acima),
--- sem empuxo para a frente: os RCS so tentam virar o missil
+-- dispara por 1,5 s os RCS que inclinam o nariz para o lado escolhido
 local function testeRcs()
   detectar()
-  if not (P.warhead and cfg.canalRcs.lado) then
-    aviso("TESTE RCS", { "Calibre o RCS antes (warhead ligada por wired modem)." }, colors.orange)
+  if #P.rcs == 0 then
+    aviso("TESTE RCS", { "Calibre o RCS antes (motores solidos do cone)." }, colors.orange)
     return
   end
-  local dirs = { N = { 0, -1 }, S = { 0, 1 }, L = { 1, 0 }, O = { -1, 0 } }
+  local dirs = { N = { 1, 0 }, S = { -1, 0 }, L = { 0, 1 }, O = { 0, -1 } }
   local msg, msgCor = "", colors.white
   while true do
     cabecalho("TESTE RCS")
-    escrever(2, 3, "Os RCS vao tentar virar o missil. Cuidado!", colors.yellow)
-    escrever(2, 5, "N/S/L/O liga a guiagem 2 s mirando p/ esse lado")
-    escrever(2, 7, ("RCS %d  comb %d  forca de virar %.2f"):format(#P.rcs, rcsComCombustivel(),
-      cfg.ladoRcs), colors.lightGray)
+    escrever(2, 3, "O nariz vai inclinar. Cuidado, ele se mexe!", colors.yellow)
+    escrever(2, 5, "N/S/L/O inclina o nariz 1.5 s para esse lado")
+    escrever(2, 7, ("RCS %d   com combustivel %d   ganho %.2f"):format(#P.rcs,
+      rcsComCombustivel(), cfg.kRcs), colors.lightGray)
     escrever(2, 9, msg, msgCor)
     rodape("N/S/L/O testa   BACKSPACE volta")
     local ev, k = os.pullEvent()
     if ev == "key" and k == keys.backspace then return end
     local d = ev == "char" and dirs[k:upper()]
     if d then
-      local p = sublevelPose() or posicao(1)
-      if not p then
-        msg, msgCor = "Sem posicao (sublevel/GPS).", colors.red
-      else
-        escrever(2, 9, "Guiagem ligada...", colors.yellow)
-        warheadPreparar({ x = p.x + 100 * d[1], y = p.y + 100, z = p.z + 100 * d[2] }, 0, cfg.ladoRcs)
-        saidaRcs(cfg.canalRcs, true)
-        sleep(0.5)
-        local ativo = rcsAtivos()
-        sleep(1.5)
-        saidaRcs(cfg.canalRcs, false)
-        msg = ("Ultimo: %s, bocais %s"):format(k:upper(), ativo and "ATIVOS" or "parados")
-        msgCor = ativo and colors.lime or colors.red
-      end
+      escrever(2, 9, ("Inclinando p/ %s..."):format(k:upper()), colors.yellow)
+      local soma = rcsAtitude(d[1], d[2])
+      sleep(1.5)
+      rcsDesligar()
+      msg = ("Ultimo: %s, potencia somada %.1f"):format(k:upper(), soma)
+      msgCor = soma > 0 and colors.lime or colors.red
     end
   end
 end
@@ -2890,7 +2908,7 @@ local function testes()
       "Controle manual do bocal",
       "Teste da ogiva (use lampada!)",
       "Teste de orientacao (sublevel)",
-      "Teste RCS (virar N/S/L/O)",
+      "Teste RCS (inclinar N/S/L/O)",
       "Voltar",
     })
     if not i or i == 7 then return end
@@ -2912,7 +2930,7 @@ local function principal()
     detectar()
     abrirRede()
     local extra = (contar("criativo") > 0 and ("  Cri " .. contar("criativo")) or "")
-      .. (#P.rcs > 0 and ("  RCS " .. #P.rcs) or "") .. (P.warhead and "  WH" or "")
+      .. (#P.rcs > 0 and ("  RCS " .. #P.rcs) or "")
     local _, noDisco = localPresets()
     local info = {
       { ("Gimbal %s  Vetor %d  Liq %d  Sol %d  Ion %d%s"):format(
@@ -2920,7 +2938,7 @@ local function principal()
           contar("solido"), contar("ion"), extra), colors.lightGray },
       { ("Calib: gimbal %s  bocal %s  giro %d/%d  rcs %s"):format(
           cfg.gimbalOk and "OK" or "PEND.", cfg.bocalOk and "OK" or "PEND.",
-          motoresMapeados(), #P.vetores, cfg.canalRcs.lado and "OK" or "--"),
+          motoresMapeados(), #P.vetores, #P.rcs > 0 and tostring(#P.rcs) or "--"),
         (cfg.gimbalOk and cfg.bocalOk) and colors.lime or colors.orange },
       { ("Rede: %s  %s"):format(nomeRede(), P.modem and "(modem OK)" or "(SEM MODEM)"),
         P.modem and colors.lightGray or colors.orange },
@@ -2938,7 +2956,7 @@ local function principal()
       "Calibrar gimbal",
       "Calibrar bocal",
       "Calibrar giro (lado dos motores)",
-      "Calibrar RCS (Guidance Warhead)",
+      "Calibrar RCS (motores do cone)",
       "Ajustes",
       "Presets (disquete)",
       "Testes",

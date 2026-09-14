@@ -247,3 +247,27 @@ Missil v4.8:
 - Status informa auth e contagem.
 Ferramentas: cc_simulador.lua + teste_base.py (testes fora do jogo com lupa).
 Torres de GPS: iguais a v4.6.
+
+v4.9-rcs-cone
+-------------
+Muda o RCS: em vez da Guidance Warhead (v4.7/v4.8), usa 4 MOTORES SOLIDOS
+(Create Propulsion) montados no CONE, apontando para fora. O computador os
+liga direto com setPowerNormalized -- sem warhead, sem redstone.
+- Nova fase QUEDA: quando o missil comeca a descer, os motores principais E os
+  vector thrusters sao CORTADOS e ele cai balistico. Como nao ha empuxo saindo,
+  o vector thruster nao consegue mais virar o missil; entao a atitude (apontar o
+  nariz) passa a ser feita pelos RCS do cone. A guiagem so PULSA um motor por
+  poucos ticks quando o erro de queda previsto (ZEM) vale a pena e ainda ha tempo.
+- Calibrar RCS: pulsa cada motor solido; o jogador ve para que lado o NARIZ
+  inclinou (N/S/L/O) ou marca como motor principal (C/ENTER). Os marcados saem
+  da propulsao e viram RCS. Ajustes "RCS (motores no cone)": usar, forca (ganho).
+- GATILHO DA OGIVA por altura: novo ajuste "Detonar a (altura do alvo)". A ogiva
+  detona ao cruzar essa altura acima do alvo, descendo, interpolando o ponto exato
+  entre duas leituras (e o momento em que ela SABE que esta sobre o alvo). Os
+  gatilhos antigos (raio, impacto, tempo maximo) ficam como reserva.
+- Voo sem RCS montado: nao corta os motores (nao tomba); guia como antes.
+- voo.csv: coluna rcs agora e a potencia somada dos RCS (0 = parado).
+- Simulacao (ferramentas/sim_terminal.py): erro ~0.5-2 blocos de 150 a 1200
+  blocos no caso realista; sem RCS nem pulsos o erro sobe para 8-150.
+Substitui o mecanismo de RCS por Guidance Warhead da v4.7/v4.8.
+Base v3.0 e torres de GPS: iguais a v4.8.
