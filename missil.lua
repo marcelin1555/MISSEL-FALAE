@@ -4,7 +4,7 @@
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "4.4"
+local VERSAO = "4.5"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -1609,11 +1609,11 @@ local function voar(opts)
 
         if S.log then
           local nz, dd = S.nariz or { 0, 0, 0 }, S.dirDes or { 0, 0, 0 }
-          S.log.writeLine(("%.2f,%s,%s,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.0f,%.2f,%.2f,%.2f,%.1f,%.1f,%d")
+          S.log.writeLine(("%.2f,%s,%s,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.0f,%.2f,%.2f,%.2f,%.1f,%.1f,%.2f")
             :format(tv, S.fase, S.modoPose and "pose" or "gimbal", p.x, p.y, p.z, vl, vy, -vn,
               S.fonteVel or (P.altimetro and "altimetro" or "posicao"), nz[1], nz[2], nz[3],
               dd[1], dd[2], dd[3], S.errAng, S.empuxo or 0, S.gravidade, S.cx, S.cy, S.hz, dist, math.deg(S.wy),
-              S.pedido or 0, S.aMin or 0, S.aMax or 0, S.erroQueda or 0, S.tgo or 0, S.nSol or 0))
+              S.pedido or 0, S.aMin or 0, S.aMax or 0, S.erroQueda or 0, S.tgo or 0, S.potSol or 0))
           if t - ultFlush >= 1 then
             S.log.flush()
             ultFlush = t
@@ -1625,7 +1625,8 @@ local function voar(opts)
 
   -- TAREFA: empuxo no modo apontamento. A navegacao pede um empuxo (S.pedido) e o
   -- acelerometro mede o real (S.empuxo). A diferenca vira kN (fator aprendido em
-  -- voo) repartidos primeiro nos liquidos e depois nos solidos, um de cada vez.
+  -- voo): primeiro nos liquidos, depois nos solidos, sempre com a MESMA potencia
+  -- em todos do grupo (um motor sozinho desequilibra o missil).
   -- Com todos eles desligados, baixa os vector thrusters ate empuxoMin.
   local function gerenciarMotores()
     local vMin, vMax = math.min(cfg.empuxoMin, cfg.empuxoVetor), cfg.empuxoVetor
@@ -1634,8 +1635,6 @@ local function voar(opts)
     for _, m in ipairs(ativos) do
       table.insert(lista, { m = m, pot = m.classe == "solido" and 1 or cfg.acelerador, max = 0 })
     end
-    -- solidos por ultimo: o combustivel deles nao repoe
-    table.sort(lista, function(a, b) return a.m.classe ~= "solido" and b.m.classe == "solido" end)
     while true do
       sleep(0.2)
       local leituras = {}
@@ -1643,7 +1642,7 @@ local function voar(opts)
         table.insert(leituras, function() e.kn = empuxoKN(e.m) end)
       end
       if #leituras > 0 then parallel.waitForAll(table.unpack(leituras)) end
-      local soma, cap, nSol = 0, 0, 0
+      local soma, cap = 0, 0
       for _, e in ipairs(lista) do
         if e.pot >= 0.2 then
           -- kN no maximo: sobe na hora, cai devagar (solido acabando)
@@ -1677,13 +1676,20 @@ local function voar(opts)
       end
       local resto = meta or math.huge
       local muda = {}
-      for _, e in ipairs(lista) do
-        local nova = e.max > 0 and clamp(resto / e.max, 0, 1) or (resto > 0 and 1 or 0)
-        resto = resto - nova * e.max
-        if nova > 0.02 and e.m.classe == "solido" then nSol = nSol + 1 end
-        if math.abs(nova - e.pot) >= 0.02 then
-          e.pot = nova
-          table.insert(muda, function() acelerar(e.m, nova) end)
+      -- grupo 1: liquidos e outros; grupo 2: solidos (o combustivel nao repoe)
+      for _, solido in ipairs({ false, true }) do
+        local capG = 0
+        for _, e in ipairs(lista) do
+          if (e.m.classe == "solido") == solido then capG = capG + e.max end
+        end
+        local nova = capG > 0 and clamp(resto / capG, 0, 1) or (resto > 0 and 1 or 0)
+        resto = resto - nova * capG
+        if solido and capG > 0 then S.potSol = nova end
+        for _, e in ipairs(lista) do
+          if (e.m.classe == "solido") == solido and math.abs(nova - e.pot) >= 0.02 then
+            e.pot = nova
+            table.insert(muda, function() acelerar(e.m, nova) end)
+          end
         end
       end
       if math.abs(vPot - ultV) >= 0.02 then
@@ -1691,7 +1697,7 @@ local function voar(opts)
         table.insert(muda, function() vetorEmpuxo(vPot) end)
       end
       if #muda > 0 then parallel.waitForAll(table.unpack(muda)) end
-      S.nSol, S.acel = nSol, cap > 0 and soma / cap or vPot
+      S.acel = cap > 0 and soma / cap or vPot
     end
   end
 
@@ -1725,7 +1731,8 @@ local function voar(opts)
       local x = 18
       escrever(x, 3, ("Incl.  N %5.1f  L %5.1f"):format(S.n, S.l))
       if S.modoPose then
-        escrever(x, 4, ("Erro%5.1f queda%5.0f sol %d"):format(S.errAng, S.erroQueda or 0, S.nSol or 0),
+        escrever(x, 4, ("Erro%5.1f queda%5.0f sol%3d%%"):format(S.errAng, S.erroQueda or 0,
+          math.floor((S.potSol or 0) * 100 + 0.5)),
           S.fraco and colors.red or colors.cyan)
       else
         escrever(x, 4, ("Pedido N %5.1f  L %5.1f"):format(S.alvoN, S.alvoL), colors.cyan)
@@ -1783,6 +1790,8 @@ local function voar(opts)
           vel = S.vel, cruzeiroY = S.cruzeiroY, armado = S.armado,
           n = S.n, l = S.l, psi = math.deg(S.psi), hz = S.hz,
           acel = S.acel, empuxo = total, motores = motores,
+          queda = S.erroQueda, tgo = S.tgo, sol = S.potSol, erro = S.errAng,
+          modo = S.modoPose and "apontamento" or "gimbal",
         }, PROTOCOLO)
       end
       sleep(0.5)

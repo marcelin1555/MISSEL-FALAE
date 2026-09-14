@@ -147,3 +147,16 @@ Missil novo com solidos: forte demais, subiu a Y 425 a 105 m/s e passou
 - acelerar usa setPower(0-15) quando o motor nao tem setPowerNormalized.
 - Gravador de voo: colunas pedido, aMin, aMax, queda, tgo, solidos.
 Base e torres de GPS: iguais a v3.1.
+
+v4.5-simetria (base v2.0)
+-------------------------
+- Motores em grupos simetricos: todos os liquidos (e outros) com a mesma
+  potencia, depois todos os solidos com a mesma potencia. Antes os solidos
+  eram ligados/desligados um a um e desequilibravam o missil.
+  Tela e voo.csv: "sol"/"solidos" = potencia do grupo de solidos.
+- Telemetria para a base: queda (erro de impacto previsto), tgo, sol, erro
+  de apontamento e modo de guiagem.
+- BASE v2.0: mostra a versao do missil (avisa se for anterior a v4.5),
+  altura do alvo na confirmacao, telemetria com previsao de impacto e
+  potencia dos solidos, e "Historico de voos" (ultimos 20, /bfm_voos.txt).
+Torres de GPS: iguais a v3.1.

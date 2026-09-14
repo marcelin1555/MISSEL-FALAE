@@ -1,12 +1,15 @@
 -- base.lua : BlockForge Militar - Base de Lancamento
 -- Controla os misseis que estao em "modo remoto" pela rede (rednet)
 -- Precisa de: computador (de preferencia avancado) + Ender Modem
+-- Telemetria completa (previsao de impacto) com missil v4.5 ou mais
 
-local VERSAO = "1.0"
+local VERSAO = "2.0"
+local MISSIL_MIN = "4.5"
 local PROTOCOLO = "bfm"
 local SERVICO = "bfm_missil"
 local ARQ_ALVOS = "bfm_alvos.txt"
 local ARQ_ESTADO = "/bfm_base.txt"
+local ARQ_VOOS = "/bfm_voos.txt"
 
 ---------------------------------------------------------------- TELA
 
@@ -195,6 +198,24 @@ local function coords(a)
   return ("%d %d %d"):format(math.floor(a.x), math.floor(a.y), math.floor(a.z))
 end
 
+-- versao "a.b" do missil >= MISSIL_MIN
+local function versaoOk(v)
+  local function num(s)
+    local a, b = tostring(s):match("(%d+)%.(%d+)")
+    return a and tonumber(a) * 1000 + tonumber(b) or 0
+  end
+  return num(v) >= num(MISSIL_MIN)
+end
+
+-- guarda os ultimos 20 voos acompanhados
+local function registrarVoo(T, motivo)
+  local lista = lerTabela(ARQ_VOOS) or {}
+  table.insert(lista, 1, { quando = os.date("%d/%m %H:%M"), missil = sel.nome or ("#" .. sel.id),
+    alvo = T and T.alvo, motivo = motivo, t = T and T.t, dist = T and T.dist })
+  while #lista > 20 do table.remove(lista) end
+  gravarTabela(ARQ_VOOS, lista)
+end
+
 ---------------------------------------------------------------- REDE
 
 local function abrirModem()
@@ -252,7 +273,7 @@ local function procurar()
 
   local ops = {}
   for _, a in ipairs(achados) do
-    table.insert(ops, ("%-22s %s"):format(a.st.nome or ("#" .. a.id),
+    table.insert(ops, ("%-18s v%-4s %s"):format(a.st.nome or ("#" .. a.id), tostring(a.st.versao),
       a.st.emVoo and "EM VOO" or (a.st.pronto and "PRONTO" or "NAO PRONTO")))
   end
   table.insert(ops, "Voltar")
@@ -264,12 +285,14 @@ local function procurar()
   salvarEstado()
   local linhas = {
     "Selecionado: " .. (a.st.nome or ("#" .. a.id)),
+    "Versao: v" .. tostring(a.st.versao)
+      .. (versaoOk(a.st.versao) and "" or ("  (antiga: atualize para v" .. MISSIL_MIN .. ")")),
     "Preset: " .. tostring(a.st.preset),
     ("Motores: vetor %d, liquidos %d, solidos %d"):format(a.st.vet or 0, a.st.liq or 0, a.st.sol or 0),
     "Codigo de lancamento: " .. (a.st.precisaCodigo and "exigido" or "nenhum"),
   }
   if a.st.pos then
-    table.insert(linhas, "Posicao GPS: " .. coords(a.st.pos))
+    table.insert(linhas, "Posicao: " .. coords(a.st.pos))
   end
   if not a.st.pronto then
     table.insert(linhas, "")
@@ -369,7 +392,10 @@ local function acompanhar()
         elseif msg.tipo == "evento" then
           table.insert(eventos, 1, msg.texto)
           if #eventos > 5 then table.remove(eventos) end
-          if msg.fim then fim = msg.texto end
+          if msg.fim and not fim then
+            fim = msg.texto
+            registrarVoo(T, fim)
+          end
         end
       end
     end
@@ -391,31 +417,34 @@ local function acompanhar()
           escrever(24, 3, ("T+%.1fs"):format(T.t or 0))
           escrever(38, 3, T.armado and "ARMADO" or "desarmado", T.armado and colors.red or colors.lime)
         end
-        if T.pos then
-          escrever(2, 5, "Posicao", cinza)
-          escrever(14, 5, ("%.0f %.0f %.0f"):format(T.pos.x, T.pos.y, T.pos.z))
+        local function linha(y, rotulo, txt, c)
+          escrever(2, y, rotulo, cinza)
+          escrever(14, y, txt, c)
         end
-        if T.alvo then
-          escrever(2, 6, "Alvo", cinza)
-          escrever(14, 6, coords(T.alvo))
-        end
+        if T.pos then linha(5, "Posicao", ("%.0f %.0f %.0f"):format(T.pos.x, T.pos.y, T.pos.z)) end
+        if T.alvo then linha(6, "Alvo", coords(T.alvo)) end
         if T.dist then
-          escrever(2, 7, "Distancia", cinza)
-          escrever(14, 7, ("%.0f blocos  (horizontal %.0f)"):format(T.dist, T.distH or 0), colors.yellow)
+          linha(7, "Distancia", ("%.0f blocos  (horizontal %.0f)"):format(T.dist, T.distH or 0), colors.yellow)
         end
         local vel = T.vel or { n = 0, l = 0, y = 0 }
         local vh = math.sqrt(vel.n * vel.n + vel.l * vel.l)
-        escrever(2, 8, "Velocidade", cinza)
-        escrever(14, 8, ("%.1f b/s   vertical %.1f"):format(vh, vel.y))
-        if T.distH and vh > 1 then
-          escrever(2, 9, "Chegada", cinza)
-          escrever(14, 9, ("~%.0f s"):format(T.distH / vh))
+        linha(8, "Velocidade", ("%.1f b/s   vertical %.1f"):format(math.sqrt(vh * vh + vel.y * vel.y), vel.y))
+        if T.queda then
+          -- missil v4.5+: previsao do ponto de queda pela guiagem balistica
+          linha(9, "Impacto", ("em %.0f s   erro previsto %.1f blocos"):format(T.tgo or 0, T.queda),
+            T.queda <= 4 and colors.lime or colors.orange)
+        elseif T.distH and vh > 1 then
+          linha(9, "Chegada", ("~%.0f s"):format(T.distH / vh))
         end
-        escrever(2, 10, "Inclinacao", cinza)
-        escrever(14, 10, ("N %.1f  L %.1f   rumo %.0f"):format(T.n or 0, T.l or 0, T.psi or 0))
-        escrever(2, 11, "Controle", cinza)
-        escrever(14, 11, ("%.1f Hz   acelerador %d%%"):format(T.hz or 0,
-          math.floor((T.acel or 0) * 100 + 0.5)), (T.hz or 0) >= 5 and colors.lime or colors.red)
+        if T.modo then
+          linha(10, "Apontamento", ("erro %.1f graus   (%s)"):format(T.erro or 0, T.modo))
+        else
+          linha(10, "Inclinacao", ("N %.1f  L %.1f   rumo %.0f"):format(T.n or 0, T.l or 0, T.psi or 0))
+        end
+        linha(11, "Motores", ("%.0f Hz   acelerador %d%%%s"):format(T.hz or 0,
+          math.floor((T.acel or 0) * 100 + 0.5),
+          T.sol and ("   solidos %d%%"):format(math.floor(T.sol * 100 + 0.5)) or ""),
+          (T.hz or 0) >= 5 and colors.lime or colors.red)
         if dist0 and T.dist and dist0 > 0 then
           local larg = W - 4
           local cheio = math.floor(larg * clamp(1 - T.dist / dist0, 0, 1) + 0.5)
@@ -486,7 +515,12 @@ local function lancar()
   if st.pos then
     local dx, dz = alvo.x - st.pos.x, alvo.z - st.pos.z
     escrever(2, 6, "Distancia", cinza)
-    escrever(14, 6, ("%d blocos"):format(math.floor(math.sqrt(dx * dx + dz * dz))))
+    escrever(14, 6, ("%d blocos  (altura %+d)"):format(math.floor(math.sqrt(dx * dx + dz * dz)),
+      math.floor(alvo.y - st.pos.y)))
+  end
+  if not versaoOk(st.versao) then
+    escrever(2, 7, ("Missil v%s: atualize para v%s ou mais"):format(tostring(st.versao), MISSIL_MIN),
+      colors.orange)
   end
 
   local codigo
@@ -516,6 +550,22 @@ local function lancar()
   acompanhar()
 end
 
+local function historico()
+  local lista = lerTabela(ARQ_VOOS) or {}
+  if #lista == 0 then
+    aviso("HISTORICO DE VOOS", { "Nenhum voo registrado.",
+      "Os voos entram aqui quando acompanhados pela base." }, colors.orange)
+    return
+  end
+  local linhas = {}
+  for _, v in ipairs(lista) do
+    table.insert(linhas, ("%s %s: %s"):format(v.quando, v.missil, v.motivo))
+    table.insert(linhas, ("   alvo %s   T+%.0fs   dist final %s"):format(v.alvo and coords(v.alvo) or "?",
+      v.t or 0, v.dist and ("%.0f"):format(v.dist) or "?"))
+  end
+  aviso("HISTORICO DE VOOS", linhas)
+end
+
 ---------------------------------------------------------------- MENU
 
 local function principal()
@@ -534,14 +584,15 @@ local function principal()
       "Alvos salvos",
       "LANCAR",
       "Acompanhar voo / abortar",
+      "Historico de voos",
       "Sair",
     }, info)
-    if not i or i == 6 then return end
+    if not i or i == 7 then return end
 
     if not modem then
       aviso("ERRO", { "Coloque um modem sem fio (Ender Modem) na base." }, colors.red)
     else
-      local acoes = { procurar, definirAlvo, alvosSalvos, lancar, acompanhar }
+      local acoes = { procurar, definirAlvo, alvosSalvos, lancar, acompanhar, historico }
       local ok, err = pcall(acoes[i])
       if not ok and err ~= "Terminated" then
         aviso("ERRO", { tostring(err) }, colors.red)
