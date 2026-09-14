@@ -74,3 +74,25 @@ v4.0-apontamento
   acima de 60 graus por 3 s aborta.
 - Sem sublevel (ou "Apontar o nariz" desligado) o voo e igual a v3.3.
 Base e torres de GPS: iguais a v3.1.
+
+v4.1-empuxo
+-----------
+- Guiagem por apontamento com "orcamento de empuxo": primeiro a parte
+  vertical (segurar a gravidade e a altura de cruzeiro); o empuxo que sobra
+  vai para o horizontal. O missil nao afunda mais ao inclinar no cruzeiro.
+- Empuxo medido em voo (acelerometro do gimbal do Create: Avionics, ou pela
+  variacao da velocidade). Aviso "EMPUXO INSUFICIENTE" quando fica abaixo
+  da gravidade (ex.: solidos acabaram). Na tela: "empuxo 1.40g".
+- Velocidade pelo sublevel (getLinearVelocity) depois de conferida com a
+  posicao; senao velocidade vertical do altimetro (Create: Avionics); senao
+  derivada da posicao.
+- Gravidade padrao 11 quando o jogo nao informa.
+- Sem troca escondida para a guiagem pelo gimbal no meio do voo: saiu a
+  conferencia sublevel x gimbal da decolagem (use o Teste de orientacao).
+  Sem orientacao: 1 s com o ultimo erro, depois segura reto pelo gimbal,
+  aborta com 5 s.
+- Referencia da orientacao salva na "Calibrar bocal" (mesmo sublevel): o
+  missil pode estar virado para outro lado na plataforma.
+  RECALIBRE O BOCAL depois de instalar a v4.1.
+- Gravador de voo: /voo.csv no computador do missil (navegacao e eventos).
+Base e torres de GPS: iguais a v3.1.

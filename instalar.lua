@@ -11,7 +11,7 @@ PROGRAMAS[#PROGRAMAS + 1] = { chave = "missil", arquivo = "missil.lua", titulo =
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "4.0"
+local VERSAO = "4.1"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -319,6 +319,7 @@ local PADRAO = {
   corrigirGiro = true, alcanceMax = 2000,
   -- guiagem de missil por apontamento (orientacao do sublevel)
   guiagemPose = true, conjugarQuat = false,
+  qCal = {}, subId = "", -- orientacao e sublevel na calibracao do bocal
   taxaVirar = 45, inclSubida = 30, angAtaque = 35, velAtaque = 40, kGuia = 0.5,
   -- ogiva e seguranca
   ladoOgiva = "top", raioDetonacao = 4, tempoArme = 5, distArme = 30,
@@ -409,7 +410,7 @@ local function temTipo(nome, lista)
 end
 
 local function detectar()
-  P = { gimbal = nil, drive = nil, modem = nil, vetores = {}, motores = {} }
+  P = { gimbal = nil, drive = nil, modem = nil, altimetro = nil, vetores = {}, motores = {} }
   -- o GPS so usa modem sem fio encostado direto no computador
   for _, lado in ipairs(rs.getSides()) do
     if peripheral.hasType(lado, "modem") and peripheral.call(lado, "isWireless") then
@@ -420,6 +421,8 @@ local function detectar()
   for _, nome in ipairs(peripheral.getNames()) do
     if peripheral.hasType(nome, "gimbal_sensor") then
       P.gimbal = P.gimbal or peripheral.wrap(nome)
+    elseif peripheral.hasType(nome, "altitude_sensor") then
+      P.altimetro = P.altimetro or peripheral.wrap(nome)
     elseif temTipo(nome, TIPOS_VETOR) then
       table.insert(P.vetores, { nome = nome, p = peripheral.wrap(nome) })
     elseif peripheral.hasType(nome, "drive") then
@@ -601,14 +604,42 @@ local function sublevelOrientacao()
   return q, len
 end
 
--- gravidade (blocos/s^2) pela API aero do CC: Sable, ou 10
+-- velocidade linear do sublevel (mundo); so e usada depois de conferida com a posicao
+local function velocidadeSublevel()
+  if type(sublevel) ~= "table" or type(sublevel.getLinearVelocity) ~= "function" then return nil end
+  local ok, v = pcall(sublevel.getLinearVelocity)
+  if ok and type(v) == "table" and type(v.x) == "number" and type(v.y) == "number"
+    and type(v.z) == "number" then
+    return v
+  end
+end
+
+local function idSublevel()
+  if type(sublevel) ~= "table" or type(sublevel.getUniqueId) ~= "function" then return "" end
+  local ok, id = pcall(sublevel.getUniqueId)
+  return ok and type(id) == "string" and id or ""
+end
+
+-- metodos do Create: Avionics que devolvem {x, y, z} (tabela ou 3 valores)
+local function lerVetor(p, metodo)
+  if not p or type(p[metodo]) ~= "function" then return nil end
+  local r = { pcall(p[metodo]) }
+  if type(r[2]) == "table" then r = { r[1], r[2][1], r[2][2], r[2][3] } end
+  if r[1] and type(r[2]) == "number" and type(r[3]) == "number" and type(r[4]) == "number" then
+    return r[2], r[3], r[4]
+  end
+end
+
+-- gravidade (blocos/s^2): API aero do CC: Sable, gimbal do Create: Avionics, ou 11
 local function gravidade()
   if type(aero) == "table" and type(aero.getGravity) == "function" then
     local ok, g = pcall(aero.getGravity)
     if ok and type(g) == "table" then g = g.y end
     if ok and type(g) == "number" and g ~= 0 then return clamp(math.abs(g), 2, 40) end
   end
-  return 10
+  local x, y, z = lerVetor(P.gimbal, "getGravity")
+  if x and x * x + y * y + z * z > 1 then return clamp(math.sqrt(x * x + y * y + z * z), 2, 40) end
+  return 11
 end
 
 local fontePos = "nenhuma"
@@ -851,6 +882,8 @@ local function calibrarBocal()
 
   cfg.eixoX, cfg.sinalX, cfg.eixoY, cfg.sinalY = eixoX, sinalX, eixoY, sinalY
   cfg.bocalOk = true
+  cfg.qCal = sublevelOrientacao() or {}
+  cfg.subId = idSublevel()
   salvarConfig()
 
   local nomes = { "Norte", "Leste" }
@@ -968,6 +1001,7 @@ local function voar(opts)
   }
 
   local function evento(txt)
+    if S.log then S.log.writeLine(("# %.1f %s"):format(os.clock() - S.inicio, txt)) end
     table.insert(S.eventos, 1, txt)
     if #S.eventos > 3 then table.remove(S.eventos) end
     if base then rednet.send(base, { tipo = "evento", texto = txt }, PROTOCOLO) end
@@ -1091,13 +1125,26 @@ local function voar(opts)
     end
   end
 
-  -- referencia da orientacao: o missil reto na plataforma
+  -- referencia da orientacao: o missil reto como na calibracao do bocal
+  -- (mesmo sublevel), senao como esta na plataforma
   if S.modoPose then
     S.q0 = sublevelOrientacao()
     if not S.q0 then
       S.modoPose = false
       evento("Sem orientacao do sublevel: guiagem pelo gimbal")
+    elseif cfg.qCal.w and cfg.subId == idSublevel() then
+      S.q0 = cfg.qCal
+    else
+      evento("Sublevel diferente da calibracao: deixe o missil virado como nela")
     end
+  end
+
+  -- acelerometro (Create: Avionics): parado ele mede a gravidade ao contrario,
+  -- na direcao do nariz. Em voo, a leitura nessa direcao e o empuxo.
+  if guiado then
+    local ax, ay, az = lerVetor(P.gimbal, "getLinearAcceleration")
+    local m = ax and math.sqrt(ax * ax + ay * ay + az * az) or 0
+    if math.abs(m - S.gravidade) < 0.3 * S.gravidade then S.acelNariz = { ax / m, ay / m, az / m } end
   end
 
   -- ignicao
@@ -1110,6 +1157,13 @@ local function voar(opts)
   end
   vetorEmpuxo(cfg.empuxoVetor)
   S.inicio = os.clock()
+  -- gravador de voo: /voo.csv, salvo no disco a cada 1 s
+  if guiado then
+    S.log = fs.open("/voo.csv", "w")
+    if S.log then
+      S.log.writeLine("t,fase,modo,x,y,z,vx,vy,vz,fonteVel,narizX,narizY,narizZ,dirX,dirY,dirZ,erro,empuxo,g,bocalX,bocalY,hz,dist")
+    end
+  end
   evento("IGNICAO")
 
   local function detonar(txt)
@@ -1134,7 +1188,6 @@ local function voar(opts)
     local refN, refL = 0, 0    -- inclinacao pedida, com rapidez limitada
     local qAnt, semQ, ultAng   -- apontamento: orientacao anterior, tempo sem ela, ultimo erro
     local erroAlto = 0         -- tempo com erro de apontamento grande
-    local conf, confTot = 0, 0 -- decolagem: o sublevel concorda com o gimbal?
     S.dirCmd = { 0, 1, 0 }
     while true do
       -- Um tick por ciclo: le o gimbal e o giro (ou a orientacao) e envia o
@@ -1170,6 +1223,7 @@ local function voar(opts)
           -- nariz e velocidade angular no referencial do lancamento
           local nx, ny, nz = narizMundo(q, S.q0)
           local pn, pl = inclinacaoVetor(nx, ny, nz)
+          S.nariz = { nx, ny, nz }
           rn, rl = 0, 0
           if qAnt then
             local wx, wv, wz = velAngular(q, qAnt, dt)
@@ -1178,18 +1232,6 @@ local function voar(opts)
             wy = wx * nx + wv * ny + wz * nz -- giro em torno do nariz
           end
           qAnt = q
-
-          -- na decolagem confere se o sublevel concorda com o gimbal
-          if S.fase == "DECOLAGEM" then
-            if math.max(math.abs(n), math.abs(l)) > 2 then
-              conf = conf + pn * n + pl * l
-              confTot = confTot + math.abs(pn * n) + math.abs(pl * l)
-            end
-          elseif confTot > 30 and conf < -0.5 * confTot then
-            confTot = 0
-            S.modoPose = false
-            evento("Orientacao invertida? Guiagem pelo gimbal (rode Teste de orientacao)")
-          end
 
           -- direcao pedida pela navegacao, virando no maximo taxaVirar graus/s
           if S.dirDes then
@@ -1213,14 +1255,16 @@ local function voar(opts)
             return
           end
         else
-          -- leitura falhou: mantem o ultimo erro por ate 1 s
-          semQ = (semQ or 0) + dt
-          rn, rl = rnF, rlF
-          ang = ultAng or { 0, 0 }
-          n, l = S.n, S.l
-          if semQ > 1 then
-            S.modoPose = false
-            evento("Orientacao do sublevel perdida: guiagem pelo gimbal")
+          -- leitura falhou: mantem o ultimo erro por 1 s, depois segura o missil
+          -- reto pelo gimbal ate a orientacao voltar; aborta apos 5 s
+          semQ, qAnt = (semQ or 0) + dt, nil
+          if semQ > 5 then
+            S.motivo = "ABORTADO: orientacao do sublevel perdida"
+            return
+          elseif semQ <= 1 then
+            rn, rl = rnF, rlF
+            ang = ultAng or { 0, 0 }
+            n, l = S.n, S.l
           end
         end
         S.incMax = math.max(S.incMax, math.abs(n), math.abs(l))
@@ -1231,7 +1275,7 @@ local function voar(opts)
       if not ang then
         local inc = math.max(math.abs(n), math.abs(l))
         S.incMax = math.max(S.incMax, inc)
-        if inc > cfg.abortar then
+        if not modoPose and inc > cfg.abortar then
           S.motivo = ("ABORTADO: inclinacao de %.0f graus"):format(inc)
           return
         end
@@ -1328,6 +1372,7 @@ local function voar(opts)
     local o = S.origem
     local ultPos, ultT, ultGps = o, os.clock(), os.clock()
     local vn, vl, vy = 0, 0, 0
+    local uVn, uVl, uVy, velConf, ultFlush = 0, 0, 0, 0, os.clock()
     local velAnt = 0
     local jT, jVn, jVl, sCN, sCL, nC = os.clock(), 0, 0, 0, 0, 0
     local ultAcel, ultVet = -1, -1
@@ -1370,9 +1415,34 @@ local function voar(opts)
         local dn, dl = horiz(ultPos, p)
         local rVn, rVl, rVy = dn / dt, dl / dt, (p.y - ultPos.y) / dt
         local velBruta = math.sqrt(rVn * rVn + rVl * rVl + rVy * rVy)
-        vn = vn + 0.5 * (rVn - vn)
-        vl = vl + 0.5 * (rVl - vl)
-        vy = vy + 0.5 * (rVy - vy)
+        local vs = velocidadeSublevel()
+        if vs and S.fonteVel == "sublevel" then
+          vn, vl, vy = -vs.z, vs.x, vs.y
+        else
+          vn = vn + 0.5 * (rVn - vn)
+          vl = vl + 0.5 * (rVl - vl)
+          vy = vy + 0.5 * (rVy - vy)
+          -- a velocidade do sublevel so e usada depois de bater 5 vezes com a posicao
+          if vs and velBruta > 3 then
+            local e = math.sqrt((vs.x - vl) ^ 2 + (vs.y - vy) ^ 2 + (vs.z + vn) ^ 2)
+            velConf = e < 0.35 * velBruta and velConf + 1 or 0
+            if velConf >= 5 then S.fonteVel = "sublevel" end
+          end
+          if P.altimetro then vy = chamar(P.altimetro, "getVerticalSpeed") or vy end
+        end
+        -- empuxo (por massa) na direcao do nariz: acelerometro ou variacao da velocidade
+        if S.modoPose then
+          local aN
+          if S.acelNariz then
+            local ax, ay, az = lerVetor(P.gimbal, "getLinearAcceleration")
+            if ax then aN = ax * S.acelNariz[1] + ay * S.acelNariz[2] + az * S.acelNariz[3] end
+          elseif S.nariz then
+            aN = ((vl - uVl) * S.nariz[1] + (vy - uVy) * S.nariz[2] - (vn - uVn) * S.nariz[3]) / dt
+              + S.gravidade * S.nariz[2]
+          end
+          if aN then S.empuxo = S.empuxo and S.empuxo + 0.2 * (aN - S.empuxo) or aN end
+        end
+        uVn, uVl, uVy = vn, vl, vy
         ultPos, ultT, ultGps = p, t, t
         S.pos, S.vel = p, { n = vn, l = vl, y = vy }
 
@@ -1420,6 +1490,14 @@ local function voar(opts)
           end
 
           acelerador(1)
+          if S.empuxo and fase ~= "DECOLAGEM" then
+            if not S.fraco and S.empuxo < S.gravidade then
+              S.fraco = true
+              evento(("EMPUXO INSUFICIENTE: %.1f < gravidade %.1f"):format(S.empuxo, S.gravidade))
+            elseif S.empuxo > 1.1 * S.gravidade then
+              S.fraco = false
+            end
+          end
           if fase == "DECOLAGEM" then
             S.dirDes = { 0, 1, 0 }
           else
@@ -1430,11 +1508,21 @@ local function voar(opts)
             local vx, vz = vl, -vn
             -- nunca freia na direcao do alvo, so corrige o desvio
             vDes = math.max(vDes, vx * ex + vy * ey + vz * ez)
-            -- aceleracao que corrige a velocidade + compensa a gravidade:
-            -- o empuxo (o nariz) tem que apontar nessa direcao
-            local dx, dy, dz = normalizar(cfg.kGuia * (ex * vDes - vx),
-              cfg.kGuia * (ey * vDes - vy) + S.gravidade,
-              cfg.kGuia * (ez * vDes - vz))
+            -- vertical primeiro: segura a gravidade e corrige a subida/descida
+            local vyDes = ey * vDes
+            if fase ~= "ATAQUE" then
+              vyDes = clamp(cfg.kAlt * (S.cruzeiroY - p.y), -cfg.velDescida, cfg.velSubida)
+            end
+            local A = math.max(S.empuxo or 1.5 * S.gravidade, 0.1)
+            local ay = clamp(S.gravidade + cfg.kGuia * (vyDes - vy), -A, A)
+            -- o empuxo que sobra vai para o horizontal (os motores nao reduzem):
+            -- primeiro corrige o desvio, o resto acelera na direcao do alvo
+            local hMax = math.sqrt(A * A - ay * ay)
+            local cx, cz = limitarMag(cfg.kGuia * (ex * vDes - vx), cfg.kGuia * (ez * vDes - vz), hMax)
+            local hx, _, hz = normalizar(ex, 0, ez)
+            local ce = cx * hx + cz * hz
+            local s = math.sqrt(math.max(ce * ce - cx * cx - cz * cz + hMax * hMax, 0)) - ce
+            local dx, dy, dz = normalizar(cx + s * hx, ay, cz + s * hz)
             if dx == 0 and dy == 0 and dz == 0 then dy = 1 end
             -- na subida o nariz nao passa de inclSubida graus da vertical
             if fase == "SUBIDA" then
@@ -1506,6 +1594,18 @@ local function voar(opts)
         end
 
         S.alvoN, S.alvoL = rotacionar(tn, tl, -S.psi)
+
+        if S.log then
+          local nz, dd = S.nariz or { 0, 0, 0 }, S.dirDes or { 0, 0, 0 }
+          S.log.writeLine(("%.2f,%s,%s,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f")
+            :format(tv, S.fase, S.modoPose and "pose" or "gimbal", p.x, p.y, p.z, vl, vy, -vn,
+              S.fonteVel or (P.altimetro and "altimetro" or "posicao"), nz[1], nz[2], nz[3],
+              dd[1], dd[2], dd[3], S.errAng, S.empuxo or 0, S.gravidade, S.cx, S.cy, S.hz, dist))
+          if t - ultFlush >= 1 then
+            S.log.flush()
+            ultFlush = t
+          end
+        end
       end
     end
   end
@@ -1540,7 +1640,8 @@ local function voar(opts)
       local x = 18
       escrever(x, 3, ("Incl.  N %5.1f  L %5.1f"):format(S.n, S.l))
       if S.modoPose then
-        escrever(x, 4, ("Apontar: erro %5.1f graus"):format(S.errAng), colors.cyan)
+        escrever(x, 4, ("Erro %4.1f  empuxo %4.2fg"):format(S.errAng, (S.empuxo or 0) / S.gravidade),
+          S.fraco and colors.red or colors.cyan)
       else
         escrever(x, 4, ("Pedido N %5.1f  L %5.1f"):format(S.alvoN, S.alvoL), colors.cyan)
       end
@@ -1643,6 +1744,10 @@ local function voar(opts)
   ogiva(false)
   if not ok then
     S.motivo = err == "Terminated" and "Interrompido (CTRL+T)" or ("Erro: " .. tostring(err))
+  end
+  if S.log then
+    S.log.writeLine("# " .. S.motivo)
+    S.log.close()
   end
   if base then
     rednet.send(base, { tipo = "evento", texto = S.motivo, fim = true }, PROTOCOLO)
@@ -1969,7 +2074,7 @@ local function ajustes()
       editarGrupo(GRUPOS[i])
     elseif confirmar("AJUSTES", "Restaurar todos os ajustes para o padrao?") then
       local manter = { "offX", "offZ", "eixoN", "sinalN", "eixoL", "sinalL", "gimbalOk",
-        "eixoX", "sinalX", "eixoY", "sinalY", "bocalOk", "posMotores", "conjugarQuat", "nome",
+        "eixoX", "sinalX", "eixoY", "sinalY", "bocalOk", "posMotores", "conjugarQuat", "qCal", "subId", "nome",
         "iniciarRemoto" }
       local novo = copiar(PADRAO)
       for _, k in ipairs(manter) do novo[k] = cfg[k] end
@@ -2306,6 +2411,7 @@ local function testeOrientacao()
       if k == keys.backspace then return end
       if k == keys.i then
         cfg.conjugarQuat = not cfg.conjugarQuat
+        if cfg.qCal.w then cfg.qCal = conjugar(cfg.qCal) end
         salvarConfig()
         q0 = conjugar(q0) -- a mesma referencia, lida do outro jeito
         soma, total = 0, 0
