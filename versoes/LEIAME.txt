@@ -124,3 +124,26 @@ alvo e voltava.
   dentro do raio entre duas leituras.
 - Estimativa de empuxo ignora picos (colisao ou travada da fisica).
 Base e torres de GPS: iguais a v3.1.
+
+v4.4-balistica
+--------------
+Missil novo com solidos: forte demais, subiu a Y 425 a 105 m/s e passou
+490 blocos do alvo.
+- Gerenciador de empuxo (tarefa gerenciarMotores): a navegacao pede um
+  empuxo, o acelerometro mede o real e a diferenca vira kN (fator aprendido
+  no voo). Liga primeiro os liquidos, depois os solidos um de cada vez (o
+  solido pode ser pausado/reduzido pelo CC: o combustivel so gasta ligado).
+  Com todos desligados, baixa os vector thrusters ate "Empuxo min do vetor".
+- Guiagem balistica depois da subida: a cada leitura simula o resto do voo
+  (nariz na velocidade, empuxo minimo) ate a altura do alvo e corrige o erro
+  de queda com N * erro / tempo^2 (ZEM). O nariz segue a velocidade: deitado
+  no alto do arco e de cabeca para o alvo no mergulho.
+- SUBIDA reta ate a altura de cruzeiro na "Velocidade de subida max".
+- Espoleta: menor distancia ao alvo no trecho entre duas leituras.
+- Ajustes: sai "Incl. max na subida" e "Mergulhar com alvo a";
+  "Nariz max fora da rota" (padrao 45) e novo "Ganho da balistica (N)" (3).
+- Simulacao (arrasto, atraso de 0.5 s nos motores, ruido): erro de ate ~3
+  blocos com alvos de 80 a 600 blocos.
+- acelerar usa setPower(0-15) quando o motor nao tem setPowerNormalized.
+- Gravador de voo: colunas pedido, aMin, aMax, queda, tgo, solidos.
+Base e torres de GPS: iguais a v3.1.
