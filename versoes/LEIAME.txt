@@ -110,3 +110,17 @@ do horizonte e depois de volta para cima: o missil tombou em loop.
   novo "Incl. max no mergulho" (padrao 60).
 - Gravador de voo: nova coluna "giro" (rotacao em torno do nariz, graus/s).
 Base e torres de GPS: iguais a v3.1.
+
+v4.3-mergulho
+-------------
+Na v4.2 o cruzeiro ficou bom, mas no ATAQUE o missil ia de pe, passava do
+alvo e voltava.
+- ATAQUE novo: o nariz aponta na linha ate o alvo. Sai dela so o necessario
+  para anular a velocidade de lado e a gravidade, no maximo "Nariz fora da
+  mira no ataque" graus (padrao 30); o resto do empuxo empurra para o alvo.
+- Padrao de "Mergulhar com alvo a" agora 55 graus (mergulho mais em pe,
+  com o nariz mais perto do alvo). Saiu "Velocidade no mergulho".
+- Espoleta: detona ao passar do alvo quando esta rapido demais para cair
+  dentro do raio entre duas leituras.
+- Estimativa de empuxo ignora picos (colisao ou travada da fisica).
+Base e torres de GPS: iguais a v3.1.
