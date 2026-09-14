@@ -4,7 +4,7 @@
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "4.3"
+local VERSAO = "4.4"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -313,7 +313,7 @@ local PADRAO = {
   -- guiagem de missil por apontamento (orientacao do sublevel)
   guiagemPose = true, conjugarQuat = false,
   qCal = {}, subId = "", -- orientacao e sublevel na calibracao do bocal
-  taxaVirar = 25, inclSubida = 30, inclAtaque = 30, angAtaque = 55, kGuia = 0.5,
+  taxaVirar = 25, inclAtaque = 45, navN = 3, kGuia = 0.5,
   -- ogiva e seguranca
   ladoOgiva = "top", raioDetonacao = 4, tempoArme = 5, distArme = 30,
   tempoMax = 180, impacto = true,
@@ -449,7 +449,7 @@ local function chamar(p, metodo, ...)
 end
 
 local function acelerar(m, pot)
-  pcall(m.p.setPowerNormalized, pot)
+  if not pcall(m.p.setPowerNormalized, pot) then pcall(m.p.setPower, math.floor(pot * 15 + 0.5)) end
 end
 
 -- Cada chamada a periferico espera o proximo tick do jogo (0,05 s).
@@ -1154,7 +1154,7 @@ local function voar(opts)
   if guiado then
     S.log = fs.open("/voo.csv", "w")
     if S.log then
-      S.log.writeLine("t,fase,modo,x,y,z,vx,vy,vz,fonteVel,narizX,narizY,narizZ,dirX,dirY,dirZ,erro,empuxo,g,bocalX,bocalY,hz,dist,giro")
+      S.log.writeLine("t,fase,modo,x,y,z,vx,vy,vz,fonteVel,narizX,narizY,narizZ,dirX,dirY,dirZ,erro,empuxo,g,bocalX,bocalY,hz,dist,giro,pedido,aMin,aMax,queda,tgo,solidos")
     end
   end
   evento("IGNICAO")
@@ -1442,7 +1442,7 @@ local function voar(opts)
           end
           -- ignora picos (colisao, travada da fisica)
           if aN and aN > 0 and aN < 3 * S.gravidade then
-            S.empuxo = S.empuxo and S.empuxo + 0.2 * (aN - S.empuxo) or aN
+            S.empuxo = S.empuxo and S.empuxo + 0.35 * (aN - S.empuxo) or aN
           end
         end
         uVn, uVl, uVy = vn, vl, vy
@@ -1465,87 +1465,87 @@ local function voar(opts)
 
         -- espoleta
         if S.armado then
-          if dist <= cfg.raioDetonacao then detonar("alvo atingido") return end
+          -- menor distancia ao alvo no trecho desde a ultima leitura: acerta mesmo
+          -- rapido demais para cair dentro do raio numa leitura
+          local a0 = S.posAnt or p
+          local sx, sy, sz = p.x - a0.x, p.y - a0.y, p.z - a0.z
+          local s2 = sx * sx + sy * sy + sz * sz
+          local k = s2 > 0 and clamp(((alvo.x - a0.x) * sx + (alvo.y - a0.y) * sy + (alvo.z - a0.z) * sz) / s2, 0, 1) or 0
+          local _, _, _, dMin = normalizar(a0.x + k * sx - alvo.x, a0.y + k * sy - alvo.y, a0.z + k * sz - alvo.z)
+          if dMin <= cfg.raioDetonacao then detonar("alvo atingido") return end
           if cfg.impacto and velAnt > 8 and velBruta < 1.5 then detonar("impacto") return end
-          -- rapido demais para cair dentro do raio entre duas leituras: detona ao passar
-          if S.distAnt and dist > S.distAnt and S.distAnt <= cfg.raioDetonacao + 0.3 * velAnt then
-            detonar("passou do alvo")
-            return
-          end
           if cfg.tempoMax > 0 and tv >= cfg.tempoMax then detonar("tempo maximo") return end
         elseif cfg.tempoMax > 0 and tv >= cfg.tempoMax then
           S.motivo = "Tempo maximo (ogiva desarmada)"
           return
         end
-        velAnt, S.distAnt = velBruta, dist
+        velAnt, S.posAnt = velBruta, p
 
         local tn, tl = 0, 0
         if S.modoPose then
-          -- MISSIL POR APONTAMENTO: o nariz aponta para onde o empuxo deve
-          -- empurrar. Motores sempre no maximo (solidos nao tem acelerador).
+          -- MISSIL POR APONTAMENTO: o nariz aponta para onde o empuxo deve empurrar
+          -- e a tarefa gerenciarMotores entrega o empuxo pedido (S.pedido).
           local fase = S.fase
-          local elev = math.deg(atan2(p.y - alvo.y, math.max(distH, 0.01)))
           if fase == "DECOLAGEM" and p.y - o.y >= cfg.altSaida then fase = "SUBIDA" end
           if fase == "SUBIDA" and p.y >= S.cruzeiroY - 3 then fase = "CRUZEIRO" end
-          -- ataque: alvo bem abaixo do horizonte ou perto. Nao volta mais.
-          if (fase == "SUBIDA" or fase == "CRUZEIRO")
-            and (elev >= cfg.angAtaque or distH <= cfg.distAtaque) then
-            fase = "ATAQUE"
-          end
+          if fase == "CRUZEIRO" and vy < -1 then fase = "ATAQUE" end
           if fase ~= S.fase then
             S.fase = fase
             evento("FASE: " .. fase)
           end
 
-          acelerador(1)
-          if S.empuxo and fase ~= "DECOLAGEM" then
-            if not S.fraco and S.empuxo < S.gravidade then
+          if S.aMax and fase ~= "DECOLAGEM" then
+            if not S.fraco and S.aMax < S.gravidade then
               S.fraco = true
-              evento(("EMPUXO INSUFICIENTE: %.1f < gravidade %.1f"):format(S.empuxo, S.gravidade))
-            elseif S.empuxo > 1.1 * S.gravidade then
+              evento(("EMPUXO INSUFICIENTE: %.1f < gravidade %.1f"):format(S.aMax, S.gravidade))
+            elseif S.aMax > 1.1 * S.gravidade then
               S.fraco = false
             end
           end
-          local A = math.max(S.empuxo or 1.5 * S.gravidade, 0.1)
-          local vx, vz = vl, -vn
-          if fase == "DECOLAGEM" then
-            S.dirDes = { 0, 1, 0 }
-          elseif fase == "ATAQUE" then
-            -- MERGULHO: nariz na linha ate o alvo. Fora dela so o necessario para
-            -- anular a velocidade de lado e a gravidade, no maximo inclAtaque graus;
-            -- o resto do empuxo empurra para o alvo. Se a gravidade vence, o missil
-            -- cai abaixo da linha, ela fica mais inclinada e a gravidade pesa menos.
-            local lx, ly, lz = normalizar(alvo.x - p.x, alvo.y - p.y, alvo.z - p.z)
-            local va = vx * lx + vy * ly + vz * lz
-            local px = -cfg.kGuia * (vx - va * lx) - S.gravidade * ly * lx
-            local py = -cfg.kGuia * (vy - va * ly) + S.gravidade * (1 - ly * ly)
-            local pz = -cfg.kGuia * (vz - va * lz) - S.gravidade * ly * lz
-            local _, _, _, m = normalizar(px, py, pz)
-            local f = math.min(1 / A, math.sin(math.rad(cfg.inclAtaque)) / math.max(m, 1e-6))
-            px, py, pz = px * f, py * f, pz * f
-            local k = math.sqrt(math.max(1 - px * px - py * py - pz * pz, 0))
-            S.dirDes = { normalizar(px + k * lx, py + k * ly, pz + k * lz) }
+          local g, vx, vz = S.gravidade, vl, -vn
+          local _, _, _, sp = normalizar(vx, vy, vz)
+          local fx, fy, fz -- empuxo pedido (blocos/s^2, mundo)
+          if fase == "DECOLAGEM" or fase == "SUBIDA" then
+            -- sobe reto na velocidade de subida, freando o que escorregar de lado
+            fx, fy, fz = -cfg.kGuia * vx, math.max(g + cfg.kGuia * (cfg.velSubida - vy), 0.5 * g), -cfg.kGuia * vz
           else
-            -- ponto de mira: acima do alvo
-            local ex, ey, ez = normalizar(alvo.x - p.x, S.cruzeiroY - p.y, alvo.z - p.z)
-            -- nunca freia na direcao do alvo, so corrige o desvio
-            local vDes = math.max(cfg.velMax, vx * ex + vy * ey + vz * ez)
-            -- vertical primeiro: segura a gravidade e corrige a subida/descida
-            local vyDes = clamp(cfg.kAlt * (S.cruzeiroY - p.y), -cfg.velDescida, cfg.velSubida)
-            -- o nariz nunca passa de 'lim' graus da vertical (nem aponta para baixo):
-            -- viradas grandes derrubam o missil
-            local lim = fase == "SUBIDA" and cfg.inclSubida or cfg.inclMax
-            -- direcao do nariz em fracoes do empuxo: primeiro a vertical
-            local dy = clamp((S.gravidade + cfg.kGuia * (vyDes - vy)) / A, math.cos(math.rad(lim)), 1)
-            -- o empuxo que sobra vai para o horizontal (os motores nao reduzem):
-            -- primeiro corrige o desvio, o resto acelera na direcao do alvo
-            local hMax = math.sqrt(1 - dy * dy)
-            local cx, cz = limitarMag(cfg.kGuia * (ex * vDes - vx) / A, cfg.kGuia * (ez * vDes - vz) / A, hMax)
-            local hx, _, hz = normalizar(ex, 0, ez)
-            local ce = cx * hx + cz * hz
-            local s = math.sqrt(math.max(ce * ce - cx * cx - cz * cz + hMax * hMax, 0)) - ce
-            S.dirDes = { normalizar(cx + s * hx, dy, cz + s * hz) }
+            -- BALISTICA: simula o voo daqui em diante com o nariz na velocidade e o
+            -- empuxo minimo, ate cruzar a altura do alvo (tgo = tempo ate la)
+            local aMin = S.aMin or 0
+            local qx, qy, qz, ux, uy, uz, tgo = p.x, p.y, p.z, vx, vy, vz, 0
+            while tgo < 90 and not (uy < 0 and qy <= alvo.y) do
+              local _, _, _, su = normalizar(ux, uy, uz)
+              local k = su > 1e-6 and aMin / su or 0
+              local ax, ay, az = ux * k, uy * k - g, uz * k
+              qx, qy, qz = qx + (ux + 0.05 * ax) * 0.1, qy + (uy + 0.05 * ay) * 0.1, qz + (uz + 0.05 * az) * 0.1
+              ux, uy, uz = ux + ax * 0.1, uy + ay * 0.1, uz + az * 0.1
+              tgo = tgo + 0.1
+            end
+            if uy < 0 and qy <= alvo.y then
+              -- volta o pedaco do ultimo passo que passou da altura do alvo
+              local tr = (qy - alvo.y) / uy
+              qx, qz, tgo = qx - ux * tr, qz - uz * tr, tgo - tr
+            else
+              -- nao desce ate o alvo (empuxo minimo segura o missil): mira direto nele
+              qx, qz, tgo = p.x, p.z, math.max(dist / math.max(sp, 5), 2)
+            end
+            -- erro de queda (ZEM): quanto erra se nao corrigir mais nada.
+            -- Correcao otima para tempo tgo: navN * erro / tgo^2
+            local zx, zz = alvo.x - qx, alvo.z - qz
+            S.erroQueda, S.tgo = mag(zx, zz), tgo
+            local c = cfg.navN / math.max(tgo, 1) ^ 2
+            local wx, wy, wz = vx / math.max(sp, 1e-6), vy / math.max(sp, 1e-6), vz / math.max(sp, 1e-6)
+            if sp < 1 then wx, wy, wz = 0, 1, 0 end
+            -- ao longo da velocidade so acelera (nao da para frear); de lado vira o
+            -- nariz, no maximo inclAtaque graus: pede mais empuxo se precisar
+            local ap = (zx * wx + zz * wz) * c
+            local ox, oy, oz = zx * c - ap * wx, -ap * wy, zz * c - ap * wz
+            local _, _, _, mo = normalizar(ox, oy, oz)
+            local al = math.max(aMin + ap, aMin, mo / math.tan(math.rad(cfg.inclAtaque)))
+            fx, fy, fz = al * wx + ox, al * wy + oy, al * wz + oz
           end
+          local dx, dy, dz, f = normalizar(fx, fy, fz)
+          if f > 0 then S.dirDes, S.pedido = { dx, dy, dz }, f end
         else
           -- fases
           local fase = S.fase
@@ -1609,16 +1609,89 @@ local function voar(opts)
 
         if S.log then
           local nz, dd = S.nariz or { 0, 0, 0 }, S.dirDes or { 0, 0, 0 }
-          S.log.writeLine(("%.2f,%s,%s,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.0f")
+          S.log.writeLine(("%.2f,%s,%s,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.0f,%.2f,%.2f,%.2f,%.1f,%.1f,%d")
             :format(tv, S.fase, S.modoPose and "pose" or "gimbal", p.x, p.y, p.z, vl, vy, -vn,
               S.fonteVel or (P.altimetro and "altimetro" or "posicao"), nz[1], nz[2], nz[3],
-              dd[1], dd[2], dd[3], S.errAng, S.empuxo or 0, S.gravidade, S.cx, S.cy, S.hz, dist, math.deg(S.wy)))
+              dd[1], dd[2], dd[3], S.errAng, S.empuxo or 0, S.gravidade, S.cx, S.cy, S.hz, dist, math.deg(S.wy),
+              S.pedido or 0, S.aMin or 0, S.aMax or 0, S.erroQueda or 0, S.tgo or 0, S.nSol or 0))
           if t - ultFlush >= 1 then
             S.log.flush()
             ultFlush = t
           end
         end
       end
+    end
+  end
+
+  -- TAREFA: empuxo no modo apontamento. A navegacao pede um empuxo (S.pedido) e o
+  -- acelerometro mede o real (S.empuxo). A diferenca vira kN (fator aprendido em
+  -- voo) repartidos primeiro nos liquidos e depois nos solidos, um de cada vez.
+  -- Com todos eles desligados, baixa os vector thrusters ate empuxoMin.
+  local function gerenciarMotores()
+    local vMin, vMax = math.min(cfg.empuxoMin, cfg.empuxoVetor), cfg.empuxoVetor
+    local vPot, ultV, meta = vMax, vMax, nil
+    local lista = {}
+    for _, m in ipairs(ativos) do
+      table.insert(lista, { m = m, pot = m.classe == "solido" and 1 or cfg.acelerador, max = 0 })
+    end
+    -- solidos por ultimo: o combustivel deles nao repoe
+    table.sort(lista, function(a, b) return a.m.classe ~= "solido" and b.m.classe == "solido" end)
+    while true do
+      sleep(0.2)
+      local leituras = {}
+      for _, e in ipairs(lista) do
+        table.insert(leituras, function() e.kn = empuxoKN(e.m) end)
+      end
+      if #leituras > 0 then parallel.waitForAll(table.unpack(leituras)) end
+      local soma, cap, nSol = 0, 0, 0
+      for _, e in ipairs(lista) do
+        if e.pot >= 0.2 then
+          -- kN no maximo: sobe na hora, cai devagar (solido acabando)
+          local m = e.kn / e.pot
+          e.max = m > e.max and m or e.max + 0.2 * (m - e.max)
+        end
+        soma, cap = soma + e.kn, cap + e.max
+      end
+      local a, pedido = S.empuxo, S.pedido
+      if a and a > 1 then
+        -- kN por blocos/s^2, medido com quase tudo ligado. Conta o empuxo dos
+        -- vetores como se fosse desses motores: corrige a menos e nao oscila.
+        if soma > 0.5 * cap and vPot >= vMax then
+          S.kPorA = S.kPorA and S.kPorA + 0.2 * (soma / a - S.kPorA) or soma / a
+        end
+        if S.kPorA then
+          -- parte dos vetores: medida direto quando o resto esta desligado
+          local base = soma < 0.02 * cap and a or math.max(a - soma / S.kPorA, 0)
+          S.aMin = base * vMin / vPot
+          S.aMax = base * vMax / vPot + cap / S.kPorA
+          if pedido then
+            local erro = pedido - a
+            if (meta or soma) <= 0 and (erro < 0 or vPot < vMax) then
+              vPot = clamp(vPot + 0.3 * erro / a * vPot, vMin, vMax)
+              meta = 0
+            else
+              meta = clamp((meta or soma) + 0.3 * erro * S.kPorA, 0, cap)
+            end
+          end
+        end
+      end
+      local resto = meta or math.huge
+      local muda = {}
+      for _, e in ipairs(lista) do
+        local nova = e.max > 0 and clamp(resto / e.max, 0, 1) or (resto > 0 and 1 or 0)
+        resto = resto - nova * e.max
+        if nova > 0.02 and e.m.classe == "solido" then nSol = nSol + 1 end
+        if math.abs(nova - e.pot) >= 0.02 then
+          e.pot = nova
+          table.insert(muda, function() acelerar(e.m, nova) end)
+        end
+      end
+      if math.abs(vPot - ultV) >= 0.02 then
+        ultV = vPot
+        table.insert(muda, function() vetorEmpuxo(vPot) end)
+      end
+      if #muda > 0 then parallel.waitForAll(table.unpack(muda)) end
+      S.nSol, S.acel = nSol, cap > 0 and soma / cap or vPot
     end
   end
 
@@ -1652,7 +1725,7 @@ local function voar(opts)
       local x = 18
       escrever(x, 3, ("Incl.  N %5.1f  L %5.1f"):format(S.n, S.l))
       if S.modoPose then
-        escrever(x, 4, ("Erro %4.1f  empuxo %4.2fg"):format(S.errAng, (S.empuxo or 0) / S.gravidade),
+        escrever(x, 4, ("Erro%5.1f queda%5.0f sol %d"):format(S.errAng, S.erroQueda or 0, S.nSol or 0),
           S.fraco and colors.red or colors.cyan)
       else
         escrever(x, 4, ("Pedido N %5.1f  L %5.1f"):format(S.alvoN, S.alvoL), colors.cyan)
@@ -1747,6 +1820,7 @@ local function voar(opts)
 
   local tarefas = { controle, telemetria, teclado }
   if guiado then table.insert(tarefas, navegacao) end
+  if guiado and S.modoPose then table.insert(tarefas, gerenciarMotores) end
   if rednet.isOpen() then table.insert(tarefas, rede) end
 
   local ok, err = pcall(parallel.waitForAny, table.unpack(tarefas))
@@ -1994,9 +2068,8 @@ local GRUPOS = {
     { "guiagemPose", "Apontar o nariz (sublevel)" },
     { "conjugarQuat", "Inverter orientacao" },
     { "taxaVirar", "Rapidez para virar (g/s)", 5, 180 },
-    { "inclSubida", "Incl. max na subida (graus)", 5, 90 },
-    { "inclAtaque", "Nariz fora da mira no ataque", 5, 85 },
-    { "angAtaque", "Mergulhar com alvo a (graus)", 5, 89 },
+    { "inclAtaque", "Nariz max fora da rota (g)", 5, 85 },
+    { "navN", "Ganho da balistica (N)", 1, 8 },
     { "kGuia", "Ganho da guiagem", 0, 5 },
   } },
   { "Ogiva e seguranca", {
