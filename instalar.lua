@@ -11,7 +11,7 @@ PROGRAMAS[#PROGRAMAS + 1] = { chave = "missil", arquivo = "missil.lua", titulo =
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "4.1"
+local VERSAO = "4.2"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -306,7 +306,7 @@ local PADRAO = {
   bocalOk = false,
   posMotores = {}, -- lado de cada vector thruster (N/S/L/O/C)
   -- voo
-  kp = 0.04, ki = 0, kd = 0.015, inverter = false,
+  kp = 0.04, ki = 0, kd = 0.03, inverter = false,
   taxaIncl = 15, -- graus/s: rapidez maxima da inclinacao pedida pela navegacao
   controleGiro = true, kGiro = 0.15, inverterGiro = false,
   empuxoVetor = 1.0, empuxoMin = 0.3, acelerador = 1.0, usarSolidos = true,
@@ -320,7 +320,7 @@ local PADRAO = {
   -- guiagem de missil por apontamento (orientacao do sublevel)
   guiagemPose = true, conjugarQuat = false,
   qCal = {}, subId = "", -- orientacao e sublevel na calibracao do bocal
-  taxaVirar = 45, inclSubida = 30, angAtaque = 35, velAtaque = 40, kGuia = 0.5,
+  taxaVirar = 25, inclSubida = 30, inclAtaque = 60, angAtaque = 35, velAtaque = 40, kGuia = 0.5,
   -- ogiva e seguranca
   ladoOgiva = "top", raioDetonacao = 4, tempoArme = 5, distArme = 30,
   tempoMax = 180, impacto = true,
@@ -1161,7 +1161,7 @@ local function voar(opts)
   if guiado then
     S.log = fs.open("/voo.csv", "w")
     if S.log then
-      S.log.writeLine("t,fase,modo,x,y,z,vx,vy,vz,fonteVel,narizX,narizY,narizZ,dirX,dirY,dirZ,erro,empuxo,g,bocalX,bocalY,hz,dist")
+      S.log.writeLine("t,fase,modo,x,y,z,vx,vy,vz,fonteVel,narizX,narizY,narizZ,dirX,dirY,dirZ,erro,empuxo,g,bocalX,bocalY,hz,dist,giro")
     end
   end
   evento("IGNICAO")
@@ -1294,8 +1294,15 @@ local function voar(opts)
       local ty = ang[cfg.eixoY] * cfg.sinalY
       local gx = giro[cfg.eixoX] * cfg.sinalX
       local gy = giro[cfg.eixoY] * cfg.sinalY
+      -- PD em cascata: o erro pede uma velocidade de giro de no maximo taxaVirar
+      -- graus/s e o KD corrige a diferenca. Assim o missil nunca gira mais rapido
+      -- do que consegue frear (com KD = 0 e o PD comum).
       local function pid(e, i, d)
-        return -inv * (cfg.kp * e + cfg.ki * i + cfg.kd * d)
+        if cfg.kd > 0 then
+          d = d + clamp(cfg.kp / cfg.kd * e, -cfg.taxaVirar, cfg.taxaVirar)
+          return -inv * (cfg.kd * d + cfg.ki * i)
+        end
+        return -inv * (cfg.kp * e + cfg.ki * i)
       end
       -- integral limitada a 30% do bocal e congelada com o bocal no limite
       if cfg.ki > 0 then
@@ -1513,26 +1520,20 @@ local function voar(opts)
             if fase ~= "ATAQUE" then
               vyDes = clamp(cfg.kAlt * (S.cruzeiroY - p.y), -cfg.velDescida, cfg.velSubida)
             end
+            -- o nariz nunca passa de 'lim' graus da vertical (nem aponta para baixo):
+            -- viradas grandes derrubam o missil
+            local lim = fase == "SUBIDA" and cfg.inclSubida or fase == "ATAQUE" and cfg.inclAtaque or cfg.inclMax
             local A = math.max(S.empuxo or 1.5 * S.gravidade, 0.1)
-            local ay = clamp(S.gravidade + cfg.kGuia * (vyDes - vy), -A, A)
+            -- direcao do nariz em fracoes do empuxo: primeiro a vertical
+            local dy = clamp((S.gravidade + cfg.kGuia * (vyDes - vy)) / A, math.cos(math.rad(lim)), 1)
             -- o empuxo que sobra vai para o horizontal (os motores nao reduzem):
             -- primeiro corrige o desvio, o resto acelera na direcao do alvo
-            local hMax = math.sqrt(A * A - ay * ay)
-            local cx, cz = limitarMag(cfg.kGuia * (ex * vDes - vx), cfg.kGuia * (ez * vDes - vz), hMax)
+            local hMax = math.sqrt(1 - dy * dy)
+            local cx, cz = limitarMag(cfg.kGuia * (ex * vDes - vx) / A, cfg.kGuia * (ez * vDes - vz) / A, hMax)
             local hx, _, hz = normalizar(ex, 0, ez)
             local ce = cx * hx + cz * hz
             local s = math.sqrt(math.max(ce * ce - cx * cx - cz * cz + hMax * hMax, 0)) - ce
-            local dx, dy, dz = normalizar(cx + s * hx, ay, cz + s * hz)
-            if dx == 0 and dy == 0 and dz == 0 then dy = 1 end
-            -- na subida o nariz nao passa de inclSubida graus da vertical
-            if fase == "SUBIDA" then
-              local h = math.sqrt(dx * dx + dz * dz)
-              local lim = math.rad(cfg.inclSubida)
-              if h > 1e-6 and atan2(h, dy) > lim then
-                dx, dy, dz = dx / h * math.sin(lim), math.cos(lim), dz / h * math.sin(lim)
-              end
-            end
-            S.dirDes = { dx, dy, dz }
+            S.dirDes = { normalizar(cx + s * hx, dy, cz + s * hz) }
           end
         else
           -- fases
@@ -1597,10 +1598,10 @@ local function voar(opts)
 
         if S.log then
           local nz, dd = S.nariz or { 0, 0, 0 }, S.dirDes or { 0, 0, 0 }
-          S.log.writeLine(("%.2f,%s,%s,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f")
+          S.log.writeLine(("%.2f,%s,%s,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.0f")
             :format(tv, S.fase, S.modoPose and "pose" or "gimbal", p.x, p.y, p.z, vl, vy, -vn,
               S.fonteVel or (P.altimetro and "altimetro" or "posicao"), nz[1], nz[2], nz[3],
-              dd[1], dd[2], dd[3], S.errAng, S.empuxo or 0, S.gravidade, S.cx, S.cy, S.hz, dist))
+              dd[1], dd[2], dd[3], S.errAng, S.empuxo or 0, S.gravidade, S.cx, S.cy, S.hz, dist, math.deg(S.wy)))
           if t - ultFlush >= 1 then
             S.log.flush()
             ultFlush = t
@@ -1983,6 +1984,7 @@ local GRUPOS = {
     { "conjugarQuat", "Inverter orientacao" },
     { "taxaVirar", "Rapidez para virar (g/s)", 5, 180 },
     { "inclSubida", "Incl. max na subida (graus)", 5, 90 },
+    { "inclAtaque", "Incl. max no mergulho (graus)", 5, 85 },
     { "angAtaque", "Mergulhar com alvo a (graus)", 5, 89 },
     { "velAtaque", "Velocidade no mergulho", 5, 200 },
     { "kGuia", "Ganho da guiagem", 0, 5 },

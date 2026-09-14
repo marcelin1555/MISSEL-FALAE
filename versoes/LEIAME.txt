@@ -96,3 +96,17 @@ v4.1-empuxo
   RECALIBRE O BOCAL depois de instalar a v4.1.
 - Gravador de voo: /voo.csv no computador do missil (navegacao e eventos).
 Base e torres de GPS: iguais a v3.1.
+
+v4.2-cascata
+------------
+Voo de teste da v4.1 (voo.csv + video): empuxo/peso de so 1,18; na SUBIDA o
+nariz passou 20 graus do pedido e no ATAQUE a guiagem pediu o nariz abaixo
+do horizonte e depois de volta para cima: o missil tombou em loop.
+- Controle PD em cascata: o erro pede uma velocidade de giro de no maximo
+  "Rapidez para virar" (padrao 25 g/s) e o KD corrige a diferenca.
+  Padrao do KD agora 0.03.
+- Nariz sempre dentro de um cone em volta da vertical (nunca aponta para
+  baixo): SUBIDA "Incl. max na subida", CRUZEIRO "Inclinacao max", ATAQUE o
+  novo "Incl. max no mergulho" (padrao 60).
+- Gravador de voo: nova coluna "giro" (rotacao em torno do nariz, graus/s).
+Base e torres de GPS: iguais a v3.1.
