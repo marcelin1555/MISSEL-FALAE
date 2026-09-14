@@ -52,3 +52,25 @@ v3.3-altura
   inclinacao maxima (ate 25%). Na tela, "acel" fica vermelho quando isso acontece.
 - Sem tranco no empuxo na passagem da DECOLAGEM para a SUBIDA.
 Base e torres de GPS: iguais a v3.1.
+Problema conhecido: com motores solidos o empuxo nao pode ser reduzido,
+o missil sobe sem parar e nunca mergulha.
+
+v4.0-apontamento
+----------------
+- Orientacao completa do missil pelo sublevel (quaternion). O CC: Sable
+  entrega um objeto do CC: Advanced Math com campos v e a (nao x,y,z,w).
+- Guiagem de missil "por apontamento" (so no voo guiado, com sublevel):
+  o nariz aponta para onde o empuxo deve empurrar, compensando a gravidade.
+  Funciona em qualquer atitude, inclusive de ponta-cabeca. Motores no maximo.
+  - SUBIDA: nariz ate "Incl. max na subida" da vertical.
+  - CRUZEIRO: mira num ponto acima do alvo.
+  - ATAQUE: quando o alvo esta a "Mergulhar com alvo a" graus abaixo do
+    horizonte (ou perto): mira no alvo e mergulha. Nao volta para o cruzeiro.
+- Novo grupo de Ajustes "Guiagem de missil (sublevel)".
+- Novo teste "Teste de orientacao (sublevel)": compara o sublevel com o
+  gimbal. Se der INVERTIDO, aperte I.
+- Protecoes: na decolagem confere se sublevel e gimbal concordam; sem
+  orientacao por mais de 1 s volta a guiar pelo gimbal; erro de apontamento
+  acima de 60 graus por 3 s aborta.
+- Sem sublevel (ou "Apontar o nariz" desligado) o voo e igual a v3.3.
+Base e torres de GPS: iguais a v3.1.
