@@ -182,3 +182,28 @@ v4.6-rcs
 - Checklist, tela ("R" = soma dos niveis), voo.csv (rcsX, rcsZ, rcsNivel)
   e telemetria (rcs). desligarTudo zera o RCS.
 Base v2.0 e torres de GPS: iguais a v4.5.
+
+v4.7-warhead
+------------
+- RCS agora guiados pela Guidance Warhead (Aero-Reformation) em vez do
+  Directional Synchronizer (Master) da v4.6. A warhead faz o PID proprio e
+  escolhe os bocais para virar o missil direto para o alvo.
+- missil.lua configura a warhead pelo periferico "aero_warhead": alvo manual
+  = alvo do lancamento, sem subida de cruzeiro (cruiseAltitude 0), sem desvio
+  de altura, maxSpeed alto (ligada, a warhead freia o missil com
+  empuxo/(800*maxSpeed) por tick), empuxo para frente e forca de virar dos
+  Ajustes. O PID (Kp/Ki/Kd) fica na tela da warhead.
+- A guiagem liga com redstone no bloco onde cada RCS esta preso. "Calibrar
+  RCS" acha sozinho a saida (lado livre do computador ou Redstone Relay):
+  liga cada uma com empuxo zero e ve se algum RCS ativou bocal.
+- Voo: no ATAQUE, com tempo ate o impacto <= "Ligar RCS a", liga a warhead
+  e o nariz passa a mirar o alvo tambem, para os dois controles nao brigarem.
+- Montagem: warhead virada para o nariz; RCS na cauda (ou no nariz),
+  alinhados com o eixo e vinculados a warhead (clique na warhead com o item
+  do RCS antes de colocar).
+- Ajustes "RCS (Guidance Warhead)": usar, empuxo para frente (pN), forca de
+  virar (sidePower) e tempo.
+- Testes: "Teste RCS" liga a guiagem 2 s mirando N/S/L/O.
+- voo.csv: coluna rcs (1 = warhead ligada) no lugar de rcsX/rcsZ/rcsNivel.
+  Telemetria: rcs = 0/1.
+Base v2.0 e torres de GPS: iguais a v4.5.
