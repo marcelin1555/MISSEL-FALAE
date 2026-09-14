@@ -4,7 +4,7 @@
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "3.3"
+local VERSAO = "4.0"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -205,6 +205,80 @@ local function horiz(de, para)
   return -(para.z - de.z), para.x - de.x
 end
 
+---------------------------------------------------------------- ORIENTACAO 3D
+-- Quaternions {x, y, z, w} que levam um vetor do corpo para o mundo.
+-- Mundo: X = leste, Y = cima, Z = sul.
+
+local function normalizar(x, y, z)
+  local m = math.sqrt(x * x + y * y + z * z)
+  if m < 1e-9 then return 0, 0, 0, 0 end
+  return x / m, y / m, z / m, m
+end
+
+local function conjugar(q)
+  return { x = -q.x, y = -q.y, z = -q.z, w = q.w }
+end
+
+-- produto a*b (aplica b, depois a)
+local function multQuat(a, b)
+  return {
+    w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    x = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y = a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+  }
+end
+
+-- gira o vetor (x, y, z) pelo quaternion q
+local function girar(q, x, y, z)
+  local tx = 2 * (q.y * z - q.z * y)
+  local ty = 2 * (q.z * x - q.x * z)
+  local tz = 2 * (q.x * y - q.y * x)
+  return x + q.w * tx + (q.y * tz - q.z * ty),
+    y + q.w * ty + (q.z * tx - q.x * tz),
+    z + q.w * tz + (q.x * ty - q.y * tx)
+end
+
+-- leva um vetor do mundo para o referencial do lancamento: o missil
+-- "congelado" como estava em q0 (reto, virado como na calibracao)
+local function paraLancamento(q, q0, x, y, z)
+  local bx, by, bz = girar(conjugar(q), x, y, z)
+  return girar(q0, bx, by, bz)
+end
+
+-- direcao do nariz no mundo (o nariz e o "cima" do missil em q0)
+local function narizMundo(q, q0)
+  local bx, by, bz = girar(conjugar(q0), 0, 1, 0)
+  return girar(q, bx, by, bz)
+end
+
+-- inclinacao (graus) de um vetor em relacao a vertical: norte, leste
+local function inclinacaoVetor(x, y, z)
+  return math.deg(atan2(-z, y)), math.deg(atan2(x, y))
+end
+
+-- velocidade angular (rad/s, mundo) entre duas orientacoes
+local function velAngular(q, qAnt, dt)
+  local d = multQuat(q, conjugar(qAnt))
+  if d.w < 0 then d = { x = -d.x, y = -d.y, z = -d.z, w = -d.w } end
+  return 2 * d.x / dt, 2 * d.y / dt, 2 * d.z / dt
+end
+
+-- gira a direcao unitaria 'a' em direcao a 'b', no maximo maxAng radianos
+local function aproximarDirecao(a, b, maxAng)
+  local dot = clamp(a[1] * b[1] + a[2] * b[2] + a[3] * b[3], -1, 1)
+  if math.acos(dot) <= maxAng then return { b[1], b[2], b[3] } end
+  -- parte de b perpendicular a a (se forem opostos, usa um eixo qualquer)
+  local px, py, pz = normalizar(b[1] - dot * a[1], b[2] - dot * a[2], b[3] - dot * a[3])
+  if px == 0 and py == 0 and pz == 0 then
+    px, py, pz = normalizar(a[2], -a[1], 0)
+    if px == 0 and py == 0 and pz == 0 then px, py, pz = 1, 0, 0 end
+  end
+  local c, s = math.cos(maxAng), math.sin(maxAng)
+  local x, y, z = normalizar(a[1] * c + px * s, a[2] * c + py * s, a[3] * c + pz * s)
+  return { x, y, z }
+end
+
 ---------------------------------------------------------------- CONFIG
 
 local LADOS = { "top", "bottom", "front", "back", "left", "right", "todos" }
@@ -236,6 +310,9 @@ local PADRAO = {
   inclMax = 20, distAtaque = 12,
   kPos = 0.25, kVel = 1.5, kAlt = 0.5, kVz = 0.08, kiVz = 0.05, acelBase = 0.6,
   corrigirGiro = true, alcanceMax = 2000,
+  -- guiagem de missil por apontamento (orientacao do sublevel)
+  guiagemPose = true, conjugarQuat = false,
+  taxaVirar = 45, inclSubida = 30, angAtaque = 35, velAtaque = 40, kGuia = 0.5,
   -- ogiva e seguranca
   ladoOgiva = "top", raioDetonacao = 4, tempoArme = 5, distArme = 30,
   tempoMax = 180, impacto = true,
@@ -492,6 +569,39 @@ local function giroVertical()
   local ok, w = pcall(sublevel.getAngularVelocity)
   if ok and type(w) == "table" and type(w.y) == "number" then return w.y end
   return nil
+end
+
+-- orientacao do sublevel (quaternion corpo -> mundo) e o tamanho lido.
+-- O CC: Sable entrega um objeto do CC: Advanced Math: campos v (x,y,z) e a (w).
+local function sublevelOrientacao()
+  if type(sublevel) ~= "table" or type(sublevel.getLogicalPose) ~= "function" then return nil end
+  local ok, pose = pcall(sublevel.getLogicalPose)
+  if not ok or type(pose) ~= "table" or type(pose.orientation) ~= "table" then return nil end
+  local o = pose.orientation
+  local x, y, z, w
+  if type(o.v) == "table" then
+    x, y, z, w = o.v.x, o.v.y, o.v.z, o.a
+  else
+    x, y, z, w = o.x, o.y, o.z, o.w
+  end
+  if type(x) ~= "number" or type(y) ~= "number" or type(z) ~= "number" or type(w) ~= "number" then
+    return nil
+  end
+  local len = math.sqrt(x * x + y * y + z * z + w * w)
+  if len < 0.9 or len > 1.1 then return nil, len end
+  local q = { x = x / len, y = y / len, z = z / len, w = w / len }
+  if cfg.conjugarQuat then q = conjugar(q) end
+  return q, len
+end
+
+-- gravidade (blocos/s^2) pela API aero do CC: Sable, ou 10
+local function gravidade()
+  if type(aero) == "table" and type(aero.getGravity) == "function" then
+    local ok, g = pcall(aero.getGravity)
+    if ok and type(g) == "table" then g = g.y end
+    if ok and type(g) == "number" and g ~= 0 then return clamp(math.abs(g), 2, 40) end
+  end
+  return 10
 end
 
 local fontePos = "nenhuma"
@@ -845,6 +955,7 @@ local function voar(opts)
     motivo = "Fim", detonou = false, armado = false,
     n = 0, l = 0, giro = 0, cx = 0, cy = 0, hz = 0,
     alvoN = 0, alvoL = 0, psi = 0, incMax = 0, wy = 0, mapeados = 0, ix = 0, iy = 0,
+    errAng = 0,
     acel = cfg.acelerador, integral = cfg.acelBase,
     vel = { n = 0, l = 0, y = 0 }, eventos = {},
   }
@@ -890,6 +1001,9 @@ local function voar(opts)
     S.cruzeiroY = math.max(o.y, alvo.y) + cfg.altCruzeiro
     S.distH = dH
     S.dist = math.sqrt(dH * dH + (alvo.y - o.y) ^ 2)
+    -- guiagem por apontamento: precisa da orientacao completa do sublevel
+    S.modoPose = cfg.guiagemPose and sublevelOrientacao() ~= nil
+    S.gravidade = gravidade()
   end
 
   local ativos = {}
@@ -912,6 +1026,8 @@ local function voar(opts)
     item(6, "Empuxo vetor / acel.", ("%d%% / %d%%"):format(
       math.floor(cfg.empuxoVetor * 100 + 0.5), math.floor(cfg.acelerador * 100 + 0.5)), true)
     if guiado then
+      item(7, "Guiagem", S.modoPose and "apontamento (sublevel)" or "inclinacao (gimbal)",
+        S.modoPose)
       item(8, "Alvo", ("%d %d %d"):format(math.floor(alvo.x), math.floor(alvo.y),
         math.floor(alvo.z)), true)
       item(9, "Distancia", ("%d blocos"):format(math.floor(S.dist)), true)
@@ -968,6 +1084,15 @@ local function voar(opts)
     end
   end
 
+  -- referencia da orientacao: o missil reto na plataforma
+  if S.modoPose then
+    S.q0 = sublevelOrientacao()
+    if not S.q0 then
+      S.modoPose = false
+      evento("Sem orientacao do sublevel: guiagem pelo gimbal")
+    end
+  end
+
   -- ignicao
   for _, m in ipairs(P.motores) do
     if m.classe == "solido" then
@@ -990,7 +1115,7 @@ local function voar(opts)
   -- As chamadas a perifericos descartam eventos enquanto esperam o jogo,
   -- entao o voo roda em tarefas paralelas, cada uma com seu proprio sleep.
 
-  -- TAREFA: estabilizacao PD (gimbal + vetor, o mais rapido possivel)
+  -- TAREFA: estabilizacao PID (gimbal ou orientacao do sublevel + vetor)
   local function controle()
     local n0, l0 = lerAngulos()
     local t0 = os.clock()
@@ -1000,14 +1125,21 @@ local function voar(opts)
     local rnF, rlF = 0, 0      -- velocidade de inclinacao filtrada
     local iX, iY = 0, 0        -- integral do PID (graus * s)
     local refN, refL = 0, 0    -- inclinacao pedida, com rapidez limitada
+    local qAnt, semQ, ultAng   -- apontamento: orientacao anterior, tempo sem ela, ultimo erro
+    local erroAlto = 0         -- tempo com erro de apontamento grande
+    local conf, confTot = 0, 0 -- decolagem: o sublevel concorda com o gimbal?
+    S.dirCmd = { 0, 1, 0 }
     while true do
-      -- Um tick por ciclo: le o gimbal e o giro e envia o comando do ciclo
-      -- anterior, tudo junto. Assim o controle roda a ate 20 Hz.
-      local n, l, wy
-      local tarefas = {
-        function() n, l = lerAngulos() end,
-        function() wy = giroVertical() end,
-      }
+      -- Um tick por ciclo: le o gimbal e o giro (ou a orientacao) e envia o
+      -- comando do ciclo anterior, tudo junto. Assim o controle roda a ate 20 Hz.
+      local n, l, wy, q
+      local modoPose = S.modoPose and S.q0 ~= nil
+      local tarefas = { function() n, l = lerAngulos() end }
+      if modoPose then
+        table.insert(tarefas, function() q = sublevelOrientacao() end)
+      else
+        table.insert(tarefas, function() wy = giroVertical() end)
+      end
       if envio then
         tarefasVetor(tarefas, envio[1], envio[2], envio[3])
         ultX, ultY, ultG = envio[1], envio[2], envio[3]
@@ -1023,23 +1155,89 @@ local function voar(opts)
       local dt = math.max(t - t0, 0.05)
       local rn, rl = (n - n0) / dt, (l - l0) / dt
       n0, l0, t0 = n, l, t
+
+      local ang
+      if modoPose then
+        if q then
+          semQ = 0
+          -- nariz e velocidade angular no referencial do lancamento
+          local nx, ny, nz = narizMundo(q, S.q0)
+          local pn, pl = inclinacaoVetor(nx, ny, nz)
+          rn, rl = 0, 0
+          if qAnt then
+            local wx, wv, wz = velAngular(q, qAnt, dt)
+            local lx, _, lz = paraLancamento(q, S.q0, wx, wv, wz)
+            rn, rl = -math.deg(lx), -math.deg(lz)
+            wy = wx * nx + wv * ny + wz * nz -- giro em torno do nariz
+          end
+          qAnt = q
+
+          -- na decolagem confere se o sublevel concorda com o gimbal
+          if S.fase == "DECOLAGEM" then
+            if math.max(math.abs(n), math.abs(l)) > 2 then
+              conf = conf + pn * n + pl * l
+              confTot = confTot + math.abs(pn * n) + math.abs(pl * l)
+            end
+          elseif confTot > 30 and conf < -0.5 * confTot then
+            confTot = 0
+            S.modoPose = false
+            evento("Orientacao invertida? Guiagem pelo gimbal (rode Teste de orientacao)")
+          end
+
+          -- direcao pedida pela navegacao, virando no maximo taxaVirar graus/s
+          if S.dirDes then
+            S.dirCmd = aproximarDirecao(S.dirCmd, S.dirDes, math.rad(cfg.taxaVirar) * dt)
+          end
+          -- erro: angulo entre o nariz e a direcao pedida, em norte/leste
+          local dx, dy, dz = paraLancamento(q, S.q0, S.dirCmd[1], S.dirCmd[2], S.dirCmd[3])
+          local h = math.sqrt(dx * dx + dz * dz)
+          local erro = math.deg(atan2(h, dy))
+          if h > 1e-6 then
+            ang = { erro * dz / h, -erro * dx / h }
+          else
+            ang = { dy < 0 and -erro or 0, 0 }
+          end
+          ultAng, S.errAng = ang, erro
+          n, l = pn, pl
+
+          if erro > 60 then erroAlto = erroAlto + dt else erroAlto = 0 end
+          if erroAlto > 3 then
+            S.motivo = ("ABORTADO: descontrole (erro de %.0f graus)"):format(erro)
+            return
+          end
+        else
+          -- leitura falhou: mantem o ultimo erro por ate 1 s
+          semQ = (semQ or 0) + dt
+          rn, rl = rnF, rlF
+          ang = ultAng or { 0, 0 }
+          n, l = S.n, S.l
+          if semQ > 1 then
+            S.modoPose = false
+            evento("Orientacao do sublevel perdida: guiagem pelo gimbal")
+          end
+        end
+        S.incMax = math.max(S.incMax, math.abs(n), math.abs(l))
+      end
       rnF = rnF + 0.5 * (rn - rnF)
       rlF = rlF + 0.5 * (rl - rlF)
 
-      local inc = math.max(math.abs(n), math.abs(l))
-      S.incMax = math.max(S.incMax, inc)
-      if inc > cfg.abortar then
-        S.motivo = ("ABORTADO: inclinacao de %.0f graus"):format(inc)
-        return
+      if not ang then
+        local inc = math.max(math.abs(n), math.abs(l))
+        S.incMax = math.max(S.incMax, inc)
+        if inc > cfg.abortar then
+          S.motivo = ("ABORTADO: inclinacao de %.0f graus"):format(inc)
+          return
+        end
+
+        -- inclinacao pedida pela navegacao, mudando no maximo taxaIncl graus/s
+        local passo = cfg.taxaIncl * dt
+        refN = refN + clamp(S.alvoN - refN, -passo, passo)
+        refL = refL + clamp(S.alvoL - refL, -passo, passo)
+        ang = { n - refN, l - refL }
       end
 
-      -- inclinacao pedida pela navegacao, mudando no maximo taxaIncl graus/s
-      local passo = cfg.taxaIncl * dt
-      refN = refN + clamp(S.alvoN - refN, -passo, passo)
-      refL = refL + clamp(S.alvoL - refL, -passo, passo)
-
       -- PID: erro = inclinacao atual - inclinacao pedida
-      local ang, giro = { n - refN, l - refL }, { rnF, rlF }
+      local giro = { rnF, rlF }
       local inv = cfg.inverter and -1 or 1
       local tx = ang[cfg.eixoX] * cfg.sinalX
       local ty = ang[cfg.eixoY] * cfg.sinalY
@@ -1196,48 +1394,94 @@ local function voar(opts)
         end
         velAnt = velBruta
 
-        -- fases
-        local fase = S.fase
-        if fase == "DECOLAGEM" and p.y - o.y >= cfg.altSaida then fase = "SUBIDA" end
-        if fase == "SUBIDA" and p.y >= S.cruzeiroY - 3 then fase = "CRUZEIRO" end
-        if (fase == "SUBIDA" or fase == "CRUZEIRO") and distH <= cfg.distAtaque then fase = "ATAQUE" end
-        if fase == "ATAQUE" and distH > cfg.distAtaque * 2.5 then fase = "CRUZEIRO" end
-        if fase ~= S.fase then
-          S.fase = fase
-          evento("FASE: " .. fase)
-        end
-
         local tn, tl = 0, 0
-        if fase == "DECOLAGEM" then
-          acelerador(cfg.acelerador)
-          S.integral = cfg.acelerador -- a subida comeca sem tranco no empuxo
-        else
-          -- vertical: o empuxo controla a velocidade de subida/descida
-          local vzDes
-          if fase == "ATAQUE" then
-            vzDes = -cfg.velDescida * clamp(1 - distH / cfg.distAtaque, 0.2, 1)
-          else
-            vzDes = clamp(cfg.kAlt * (S.cruzeiroY - p.y), -cfg.velDescida, cfg.velSubida)
+        if S.modoPose then
+          -- MISSIL POR APONTAMENTO: o nariz aponta para onde o empuxo deve
+          -- empurrar. Motores sempre no maximo (solidos nao tem acelerador).
+          local fase = S.fase
+          local elev = math.deg(atan2(p.y - alvo.y, math.max(distH, 0.01)))
+          if fase == "DECOLAGEM" and p.y - o.y >= cfg.altSaida then fase = "SUBIDA" end
+          if fase == "SUBIDA" and p.y >= S.cruzeiroY - 3 then fase = "CRUZEIRO" end
+          -- ataque: alvo bem abaixo do horizonte ou perto. Nao volta mais.
+          if (fase == "SUBIDA" or fase == "CRUZEIRO")
+            and (elev >= cfg.angAtaque or distH <= cfg.distAtaque) then
+            fase = "ATAQUE"
           end
-          local erro = vzDes - vy
-          S.integral = clamp(S.integral + cfg.kiVz * erro * dt, 0, 1)
-          local u = S.integral + cfg.kVz * erro
-          -- inclinado, parte do empuxo vai para o lado: compensa
-          local incAtual = math.min(math.max(math.abs(S.n), math.abs(S.l)), 60)
-          u = clamp(u / math.max(math.cos(math.rad(incAtual)), 0.5), 0, 1)
+          if fase ~= S.fase then
+            S.fase = fase
+            evento("FASE: " .. fase)
+          end
 
-          -- prioridade para a altura: empuxo no maximo e mesmo assim
-          -- afundando -> inclina menos para sobrar empuxo para cima
-          S.limAlt = u >= 0.98 and erro > 1.5
-          fatorIncl = fatorIncl + ((S.limAlt and 0.25 or 1) - fatorIncl) * 0.3
-          acelerador(u)
+          acelerador(1)
+          if fase == "DECOLAGEM" then
+            S.dirDes = { 0, 1, 0 }
+          else
+            -- ponto de mira: acima do alvo no cruzeiro, o proprio alvo no ataque
+            local mx, my, mz, vDes = alvo.x, S.cruzeiroY, alvo.z, cfg.velMax
+            if fase == "ATAQUE" then my, vDes = alvo.y, cfg.velAtaque end
+            local ex, ey, ez = normalizar(mx - p.x, my - p.y, mz - p.z)
+            local vx, vz = vl, -vn
+            -- nunca freia na direcao do alvo, so corrige o desvio
+            vDes = math.max(vDes, vx * ex + vy * ey + vz * ez)
+            -- aceleracao que corrige a velocidade + compensa a gravidade:
+            -- o empuxo (o nariz) tem que apontar nessa direcao
+            local dx, dy, dz = normalizar(cfg.kGuia * (ex * vDes - vx),
+              cfg.kGuia * (ey * vDes - vy) + S.gravidade,
+              cfg.kGuia * (ez * vDes - vz))
+            if dx == 0 and dy == 0 and dz == 0 then dy = 1 end
+            -- na subida o nariz nao passa de inclSubida graus da vertical
+            if fase == "SUBIDA" then
+              local h = math.sqrt(dx * dx + dz * dz)
+              local lim = math.rad(cfg.inclSubida)
+              if h > 1e-6 and atan2(h, dy) > lim then
+                dx, dy, dz = dx / h * math.sin(lim), math.cos(lim), dz / h * math.sin(lim)
+              end
+            end
+            S.dirDes = { dx, dy, dz }
+          end
+        else
+          -- fases
+          local fase = S.fase
+          if fase == "DECOLAGEM" and p.y - o.y >= cfg.altSaida then fase = "SUBIDA" end
+          if fase == "SUBIDA" and p.y >= S.cruzeiroY - 3 then fase = "CRUZEIRO" end
+          if (fase == "SUBIDA" or fase == "CRUZEIRO") and distH <= cfg.distAtaque then fase = "ATAQUE" end
+          if fase == "ATAQUE" and distH > cfg.distAtaque * 2.5 then fase = "CRUZEIRO" end
+          if fase ~= S.fase then
+            S.fase = fase
+            evento("FASE: " .. fase)
+          end
 
-          -- horizontal: posicao -> velocidade desejada -> inclinacao desejada
-          local vMax, iMax = cfg.velMax, cfg.inclMax * fatorIncl
-          if fase == "SUBIDA" then iMax = iMax * 0.5 end
-          if fase == "ATAQUE" then vMax = math.min(vMax, math.max(2, distH)) end
-          local dvn, dvl = limitarMag(cfg.kPos * en, cfg.kPos * el, vMax)
-          tn, tl = limitarMag(cfg.kVel * (dvn - vn), cfg.kVel * (dvl - vl), iMax)
+          if fase == "DECOLAGEM" then
+            acelerador(cfg.acelerador)
+            S.integral = cfg.acelerador -- a subida comeca sem tranco no empuxo
+          else
+            -- vertical: o empuxo controla a velocidade de subida/descida
+            local vzDes
+            if fase == "ATAQUE" then
+              vzDes = -cfg.velDescida * clamp(1 - distH / cfg.distAtaque, 0.2, 1)
+            else
+              vzDes = clamp(cfg.kAlt * (S.cruzeiroY - p.y), -cfg.velDescida, cfg.velSubida)
+            end
+            local erro = vzDes - vy
+            S.integral = clamp(S.integral + cfg.kiVz * erro * dt, 0, 1)
+            local u = S.integral + cfg.kVz * erro
+            -- inclinado, parte do empuxo vai para o lado: compensa
+            local incAtual = math.min(math.max(math.abs(S.n), math.abs(S.l)), 60)
+            u = clamp(u / math.max(math.cos(math.rad(incAtual)), 0.5), 0, 1)
+
+            -- prioridade para a altura: empuxo no maximo e mesmo assim
+            -- afundando -> inclina menos para sobrar empuxo para cima
+            S.limAlt = u >= 0.98 and erro > 1.5
+            fatorIncl = fatorIncl + ((S.limAlt and 0.25 or 1) - fatorIncl) * 0.3
+            acelerador(u)
+
+            -- horizontal: posicao -> velocidade desejada -> inclinacao desejada
+            local vMax, iMax = cfg.velMax, cfg.inclMax * fatorIncl
+            if fase == "SUBIDA" then iMax = iMax * 0.5 end
+            if fase == "ATAQUE" then vMax = math.min(vMax, math.max(2, distH)) end
+            local dvn, dvl = limitarMag(cfg.kPos * en, cfg.kPos * el, vMax)
+            tn, tl = limitarMag(cfg.kVel * (dvn - vn), cfg.kVel * (dvl - vl), iMax)
+          end
         end
 
         -- estima o giro do missil no proprio eixo comparando o que foi
@@ -1247,7 +1491,7 @@ local function voar(opts)
           local dtj = t - jT
           local an, al = (vn - jVn) / dtj, (vl - jVl) / dtj
           local cn, cl = sCN / nC, sCL / nC
-          if cfg.corrigirGiro and not S.temGiro and fase ~= "DECOLAGEM" and mag(cn, cl) > 4 and mag(an, al) > 0.8 then
+          if cfg.corrigirGiro and not S.temGiro and S.fase ~= "DECOLAGEM" and mag(cn, cl) > 4 and mag(an, al) > 0.8 then
             local e = atan2(cn * al - cl * an, cn * an + cl * al)
             S.psi = clamp(S.psi + 0.3 * e, -math.rad(60), math.rad(60))
           end
@@ -1288,7 +1532,11 @@ local function voar(opts)
       desenharHorizonte(S.n, S.l, S.alvoN, S.alvoL)
       local x = 18
       escrever(x, 3, ("Incl.  N %5.1f  L %5.1f"):format(S.n, S.l))
-      escrever(x, 4, ("Pedido N %5.1f  L %5.1f"):format(S.alvoN, S.alvoL), colors.cyan)
+      if S.modoPose then
+        escrever(x, 4, ("Apontar: erro %5.1f graus"):format(S.errAng), colors.cyan)
+      else
+        escrever(x, 4, ("Pedido N %5.1f  L %5.1f"):format(S.alvoN, S.alvoL), colors.cyan)
+      end
       escrever(x, 5, ("Bocal %5.2f %5.2f  I %5.2f %5.2f"):format(S.cx, S.cy, S.ix, S.iy),
         colors.lightBlue)
       escrever(x, 6, ("Ctrl %4.1f Hz   Giro %4.0f/s"):format(S.hz, S.giro),
@@ -1618,6 +1866,15 @@ local GRUPOS = {
     { "corrigirGiro", "Corrigir rumo automatico" },
     { "alcanceMax", "Alcance maximo (blocos)", 50, 20000 },
   } },
+  { "Guiagem de missil (sublevel)", {
+    { "guiagemPose", "Apontar o nariz (sublevel)" },
+    { "conjugarQuat", "Inverter orientacao" },
+    { "taxaVirar", "Rapidez para virar (g/s)", 5, 180 },
+    { "inclSubida", "Incl. max na subida (graus)", 5, 90 },
+    { "angAtaque", "Mergulhar com alvo a (graus)", 5, 89 },
+    { "velAtaque", "Velocidade no mergulho", 5, 200 },
+    { "kGuia", "Ganho da guiagem", 0, 5 },
+  } },
   { "Ogiva e seguranca", {
     { "ladoOgiva", "Lado da ogiva (redstone)" },
     { "raioDetonacao", "Raio de detonacao", 1, 20 },
@@ -1705,7 +1962,8 @@ local function ajustes()
       editarGrupo(GRUPOS[i])
     elseif confirmar("AJUSTES", "Restaurar todos os ajustes para o padrao?") then
       local manter = { "offX", "offZ", "eixoN", "sinalN", "eixoL", "sinalL", "gimbalOk",
-        "eixoX", "sinalX", "eixoY", "sinalY", "bocalOk", "posMotores", "nome", "iniciarRemoto" }
+        "eixoX", "sinalX", "eixoY", "sinalY", "bocalOk", "posMotores", "conjugarQuat", "nome",
+        "iniciarRemoto" }
       local novo = copiar(PADRAO)
       for _, k in ipairs(manter) do novo[k] = cfg[k] end
       cfg = novo
@@ -1980,6 +2238,77 @@ local function testeOgiva()
   aviso("TESTE DA OGIVA", { "Redstone desligado.", "A lampada acendeu? Entao a ogiva esta ok." }, colors.lime)
 end
 
+-- compara a inclinacao pela orientacao do sublevel com a do gimbal
+local function testeOrientacao()
+  detectar()
+  if not P.gimbal then
+    aviso("ORIENTACAO", { "Gimbal Sensor nao encontrado." }, colors.red)
+    return
+  end
+  local q0, len = sublevelOrientacao()
+  if not q0 then
+    aviso("ORIENTACAO", {
+      "O sublevel nao entregou a orientacao.",
+      len and ("Tamanho do quaternion: %.3f (precisa ser 1)"):format(len)
+        or "O computador esta montado na contraption?",
+    }, colors.red)
+    return
+  end
+  local soma, total = 0, 0
+
+  local function tela()
+    while true do
+      local q = sublevelOrientacao()
+      local n, l = lerAngulos()
+      cabecalho("TESTE DE ORIENTACAO")
+      escrever(2, 3, "Missil RETO ao abrir esta tela.", colors.lightGray)
+      escrever(2, 4, "Incline para varios lados e compare:", colors.lightGray)
+      if q then
+        local qn, ql = inclinacaoVetor(narizMundo(q, q0))
+        escrever(2, 6, ("Sublevel  N %6.1f   L %6.1f"):format(qn, ql), colors.cyan)
+        if math.max(math.abs(n), math.abs(l)) > 4 then
+          soma = soma + qn * n + ql * l
+          total = total + math.abs(qn * n) + math.abs(ql * l)
+        end
+      else
+        escrever(2, 6, "Sublevel  sem orientacao", colors.red)
+      end
+      escrever(2, 7, ("Gimbal    N %6.1f   L %6.1f"):format(n, l), colors.lime)
+      local txt, c = "Incline mais o missil...", colors.lightGray
+      if total > 300 then
+        local r = soma / total
+        if r > 0.6 then
+          txt, c = "CERTO: sublevel e gimbal concordam", colors.lime
+        elseif r < -0.6 then
+          txt, c = "INVERTIDO: aperte I", colors.red
+        else
+          txt, c = "Nao bate: gimbal calibrado? mesma direcao?", colors.orange
+        end
+      end
+      escrever(2, 9, txt, c)
+      escrever(2, 11, "Inverter orientacao: " .. (cfg.conjugarQuat and "SIM" or "NAO"),
+        colors.lightGray)
+      rodape("I inverte   BACKSPACE volta")
+      sleep(0.1)
+    end
+  end
+
+  local function teclas()
+    while true do
+      local _, k = os.pullEvent("key")
+      if k == keys.backspace then return end
+      if k == keys.i then
+        cfg.conjugarQuat = not cfg.conjugarQuat
+        salvarConfig()
+        q0 = conjugar(q0) -- a mesma referencia, lida do outro jeito
+        soma, total = 0, 0
+      end
+    end
+  end
+
+  parallel.waitForAny(tela, teclas)
+end
+
 local function testes()
   while true do
     local i = menu("TESTES", {
@@ -1987,13 +2316,15 @@ local function testes()
       "Teste de GPS",
       "Controle manual do bocal",
       "Teste da ogiva (use lampada!)",
+      "Teste de orientacao (sublevel)",
       "Voltar",
     })
-    if not i or i == 5 then return end
+    if not i or i == 6 then return end
     if i == 1 then painel()
     elseif i == 2 then testeGps()
     elseif i == 3 then bocalManual()
-    elseif i == 4 then testeOgiva() end
+    elseif i == 4 then testeOgiva()
+    elseif i == 5 then testeOrientacao() end
     desligarTudo()
     ogiva(false)
   end
