@@ -11,7 +11,7 @@ PROGRAMAS[#PROGRAMAS + 1] = { chave = "missil", arquivo = "missil.lua", titulo =
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "4.2"
+local VERSAO = "4.3"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -320,7 +320,7 @@ local PADRAO = {
   -- guiagem de missil por apontamento (orientacao do sublevel)
   guiagemPose = true, conjugarQuat = false,
   qCal = {}, subId = "", -- orientacao e sublevel na calibracao do bocal
-  taxaVirar = 25, inclSubida = 30, inclAtaque = 60, angAtaque = 35, velAtaque = 40, kGuia = 0.5,
+  taxaVirar = 25, inclSubida = 30, inclAtaque = 30, angAtaque = 55, kGuia = 0.5,
   -- ogiva e seguranca
   ladoOgiva = "top", raioDetonacao = 4, tempoArme = 5, distArme = 30,
   tempoMax = 180, impacto = true,
@@ -1447,7 +1447,10 @@ local function voar(opts)
             aN = ((vl - uVl) * S.nariz[1] + (vy - uVy) * S.nariz[2] - (vn - uVn) * S.nariz[3]) / dt
               + S.gravidade * S.nariz[2]
           end
-          if aN then S.empuxo = S.empuxo and S.empuxo + 0.2 * (aN - S.empuxo) or aN end
+          -- ignora picos (colisao, travada da fisica)
+          if aN and aN > 0 and aN < 3 * S.gravidade then
+            S.empuxo = S.empuxo and S.empuxo + 0.2 * (aN - S.empuxo) or aN
+          end
         end
         uVn, uVl, uVy = vn, vl, vy
         ultPos, ultT, ultGps = p, t, t
@@ -1471,12 +1474,17 @@ local function voar(opts)
         if S.armado then
           if dist <= cfg.raioDetonacao then detonar("alvo atingido") return end
           if cfg.impacto and velAnt > 8 and velBruta < 1.5 then detonar("impacto") return end
+          -- rapido demais para cair dentro do raio entre duas leituras: detona ao passar
+          if S.distAnt and dist > S.distAnt and S.distAnt <= cfg.raioDetonacao + 0.3 * velAnt then
+            detonar("passou do alvo")
+            return
+          end
           if cfg.tempoMax > 0 and tv >= cfg.tempoMax then detonar("tempo maximo") return end
         elseif cfg.tempoMax > 0 and tv >= cfg.tempoMax then
           S.motivo = "Tempo maximo (ogiva desarmada)"
           return
         end
-        velAnt = velBruta
+        velAnt, S.distAnt = velBruta, dist
 
         local tn, tl = 0, 0
         if S.modoPose then
@@ -1505,25 +1513,35 @@ local function voar(opts)
               S.fraco = false
             end
           end
+          local A = math.max(S.empuxo or 1.5 * S.gravidade, 0.1)
+          local vx, vz = vl, -vn
           if fase == "DECOLAGEM" then
             S.dirDes = { 0, 1, 0 }
+          elseif fase == "ATAQUE" then
+            -- MERGULHO: nariz na linha ate o alvo. Fora dela so o necessario para
+            -- anular a velocidade de lado e a gravidade, no maximo inclAtaque graus;
+            -- o resto do empuxo empurra para o alvo. Se a gravidade vence, o missil
+            -- cai abaixo da linha, ela fica mais inclinada e a gravidade pesa menos.
+            local lx, ly, lz = normalizar(alvo.x - p.x, alvo.y - p.y, alvo.z - p.z)
+            local va = vx * lx + vy * ly + vz * lz
+            local px = -cfg.kGuia * (vx - va * lx) - S.gravidade * ly * lx
+            local py = -cfg.kGuia * (vy - va * ly) + S.gravidade * (1 - ly * ly)
+            local pz = -cfg.kGuia * (vz - va * lz) - S.gravidade * ly * lz
+            local _, _, _, m = normalizar(px, py, pz)
+            local f = math.min(1 / A, math.sin(math.rad(cfg.inclAtaque)) / math.max(m, 1e-6))
+            px, py, pz = px * f, py * f, pz * f
+            local k = math.sqrt(math.max(1 - px * px - py * py - pz * pz, 0))
+            S.dirDes = { normalizar(px + k * lx, py + k * ly, pz + k * lz) }
           else
-            -- ponto de mira: acima do alvo no cruzeiro, o proprio alvo no ataque
-            local mx, my, mz, vDes = alvo.x, S.cruzeiroY, alvo.z, cfg.velMax
-            if fase == "ATAQUE" then my, vDes = alvo.y, cfg.velAtaque end
-            local ex, ey, ez = normalizar(mx - p.x, my - p.y, mz - p.z)
-            local vx, vz = vl, -vn
+            -- ponto de mira: acima do alvo
+            local ex, ey, ez = normalizar(alvo.x - p.x, S.cruzeiroY - p.y, alvo.z - p.z)
             -- nunca freia na direcao do alvo, so corrige o desvio
-            vDes = math.max(vDes, vx * ex + vy * ey + vz * ez)
+            local vDes = math.max(cfg.velMax, vx * ex + vy * ey + vz * ez)
             -- vertical primeiro: segura a gravidade e corrige a subida/descida
-            local vyDes = ey * vDes
-            if fase ~= "ATAQUE" then
-              vyDes = clamp(cfg.kAlt * (S.cruzeiroY - p.y), -cfg.velDescida, cfg.velSubida)
-            end
+            local vyDes = clamp(cfg.kAlt * (S.cruzeiroY - p.y), -cfg.velDescida, cfg.velSubida)
             -- o nariz nunca passa de 'lim' graus da vertical (nem aponta para baixo):
             -- viradas grandes derrubam o missil
-            local lim = fase == "SUBIDA" and cfg.inclSubida or fase == "ATAQUE" and cfg.inclAtaque or cfg.inclMax
-            local A = math.max(S.empuxo or 1.5 * S.gravidade, 0.1)
+            local lim = fase == "SUBIDA" and cfg.inclSubida or cfg.inclMax
             -- direcao do nariz em fracoes do empuxo: primeiro a vertical
             local dy = clamp((S.gravidade + cfg.kGuia * (vyDes - vy)) / A, math.cos(math.rad(lim)), 1)
             -- o empuxo que sobra vai para o horizontal (os motores nao reduzem):
@@ -1984,9 +2002,8 @@ local GRUPOS = {
     { "conjugarQuat", "Inverter orientacao" },
     { "taxaVirar", "Rapidez para virar (g/s)", 5, 180 },
     { "inclSubida", "Incl. max na subida (graus)", 5, 90 },
-    { "inclAtaque", "Incl. max no mergulho (graus)", 5, 85 },
+    { "inclAtaque", "Nariz fora da mira no ataque", 5, 85 },
     { "angAtaque", "Mergulhar com alvo a (graus)", 5, 89 },
-    { "velAtaque", "Velocidade no mergulho", 5, 200 },
     { "kGuia", "Ganho da guiagem", 0, 5 },
   } },
   { "Ogiva e seguranca", {
