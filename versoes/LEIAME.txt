@@ -288,3 +288,18 @@ Correcao dos dois bugs vistos no primeiro voo da v4.9 (computador 15):
   apontado (erro < 18 graus). Fora disso, tudo desligado (queda balistica) e so
   o RCS aponta o nariz.
 Base v3.0 e torres de GPS: iguais a v4.9.
+
+v4.9.2-mergulho
+---------------
+Conserta o apontamento do RCS na queda (o missil ficava preso na horizontal,
+tentando manter ~90 graus em vez de apontar o pico para baixo).
+- O comando do RCS da v4.9.1 so alinhava o RUMO horizontal (N/L) do nariz, entao
+  nao controlava a INCLINACAO (pitch): o nariz nao descia. Agora o comando vem do
+  produto vetorial nariz x dirCmd (mundo), decomposto nos eixos horizontais
+  Leste(+X) e Norte(-Z): os RCS N/S sobem/descem o nariz e os L/O guinam. Assim o
+  nariz aponta em 3D, inclusive direto para baixo.
+- Na QUEDA o nariz agora mira DIRETO NO ALVO (mergulho), nao na velocidade -- por
+  isso ele nao fica mais parado na horizontal. Os motores so pulsam (em direcao ao
+  alvo) para corrigir o erro previsto, com o nariz ja apontado.
+- inverterRcs continua disponivel se o RCS apontar ao contrario no jogo.
+Base v3.0 e torres de GPS: iguais a v4.9.
