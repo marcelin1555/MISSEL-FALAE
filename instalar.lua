@@ -11,7 +11,7 @@ PROGRAMAS[#PROGRAMAS + 1] = { chave = "missil", arquivo = "missil.lua", titulo =
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "4.9.1"
+local VERSAO = "4.9.2"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -1510,6 +1510,7 @@ local function voar(opts)
             local lx, _, lz = paraLancamento(q, S.q0, wx, wv, wz)
             rn, rl = -math.deg(lx), -math.deg(lz)
             wy = wx * nx + wv * ny + wz * nz -- giro em torno do nariz
+            S.wWorld = { wx, wv, wz }        -- vel. angular no mundo (amortece o RCS)
           end
           qAnt = q
 
@@ -1645,23 +1646,31 @@ local function voar(opts)
       end
 
       -- RCS do cone: na QUEDA os motores e os vetores estao desligados, entao a
-      -- atitude (apontar o nariz) vem dos motores solidos do cone. O comando e no
-      -- referencial COMPASS (Norte = -Z, Leste = +X), o mesmo em que o RCS foi
-      -- calibrado -- direto da geometria, sem passar pelo referencial do bocal.
+      -- atitude (apontar o nariz, INCLUSIVE para baixo) vem dos motores solidos do
+      -- cone. A rotacao que leva o nariz ate a direcao pedida e o produto vetorial
+      -- nariz x dirCmd (no mundo); decompomos nos eixos horizontais Leste(+X) e
+      -- Norte(-Z) -- os RCS N/S giram sobre o eixo Leste (sobem/descem o nariz no
+      -- plano N-S) e os RCS L/O sobre o eixo Norte. Assim o nariz aponta em 3D.
       if S.rcsAtit and modoPose and q and S.dirCmd and S.nariz and #P.rcs > 0 then
-        -- direcao pedida e nariz atual, levados ao referencial do lancamento
-        local wx, _, wz = paraLancamento(q, S.q0, S.dirCmd[1], S.dirCmd[2], S.dirCmd[3])
-        local nx, _, nz = paraLancamento(q, S.q0, S.nariz[1], S.nariz[2], S.nariz[3])
-        -- inclinacao do nariz para o lado, em compass: quanto falta para alinhar
-        local eN, eL = nz - wz, wx - nx        -- N = -Z, L = +X
-        -- taxa da inclinacao do nariz (compass), filtrada, para amortecer
-        local tN, tL = ((-nz) - (S.rcsPn or -nz)) / dt, (nx - (S.rcsPl or nx)) / dt
-        S.rcsPn, S.rcsPl = -nz, nx
-        S.rcsFn = (S.rcsFn or 0) + 0.5 * (tN - (S.rcsFn or 0))
-        S.rcsFl = (S.rcsFl or 0) + 0.5 * (tL - (S.rcsFl or 0))
+        local nx, ny, nz = S.nariz[1], S.nariz[2], S.nariz[3]
+        local dcx, dcy, dcz = S.dirCmd[1], S.dirCmd[2], S.dirCmd[3]
+        -- r = nariz x dirCmd (eixo de rotacao * sen do angulo)
+        local rx = ny * dcz - nz * dcy
+        local rz = nx * dcy - ny * dcx
+        local w = S.wWorld or { 0, 0, 0 }
         local inv = cfg.inverterRcs and -1 or 1
-        local function cmd(e, taxa) return lim1(cfg.kRcs * (6 * e - 0.4 * taxa)) end
-        S.rcsNivel = rcsAtitude(inv * cmd(eN, S.rcsFn), inv * cmd(eL, S.rcsFl))
+        -- comando sobre cada eixo, amortecido pela velocidade angular do mundo
+        local cmdX = inv * (rx - 0.3 * w[1])   -- rotacao sobre Leste (+X): pico N/S/baixo
+        local cmdZ = inv * (rz - 0.3 * w[3])   -- rotacao sobre Norte (-Z): pico L/O
+        local tarefas, soma = {}, 0
+        for _, e in ipairs(P.rcs) do
+          -- eixo de rotacao do motor (mundo, com o missil reto): A = (-tn, 0, -tl)
+          local pot = clamp(cfg.kRcs * ((-e.tn) * cmdX + (-e.tl) * cmdZ), 0, 1)
+          soma = soma + pot
+          table.insert(tarefas, function() acelerar(e.m, pot) end)
+        end
+        if #tarefas > 0 then parallel.waitForAll(table.unpack(tarefas)) end
+        S.rcsNivel = soma
       elseif not S.rcsAtit and S.rcsNivel then
         rcsDesligar()
         S.rcsNivel = nil
@@ -1871,14 +1880,16 @@ local function voar(opts)
             local al = math.max(aMin + ap, aMin, mo / math.tan(math.rad(cfg.inclAtaque)))
             fx, fy, fz = al * wx + ox, al * wy + oy, al * wz + oz
             if coast then
-              -- QUEDA: o RCS aponta o nariz; os motores/vetores ficam DESLIGADOS e
-              -- so dao um pulso curto quando (1) o erro previsto vale a pena, (2) ainda
-              -- ha tempo e (3) o nariz JA esta apontado para a correcao (senao o empuxo
-              -- iria para o lado errado). Deadband no erro para nao pulsar a toa.
+              -- QUEDA (mergulho): o nariz aponta o PICO PARA BAIXO, direto no alvo
+              -- (nao na velocidade -- por isso ele nao fica mais preso na horizontal).
+              -- Os RCS mantem o nariz nessa direcao; os motores/vetores so dao um pulso
+              -- curto quando o erro previsto vale a pena, ainda ha tempo E o nariz ja
+              -- esta apontado (senao o empuxo iria para o lado errado).
+              local tx, ty, tz = normalizar(alvo.x - p.x, alvo.y - p.y, alvo.z - p.z)
+              if tx == 0 and ty == 0 and tz == 0 then tx, ty, tz = 0, -1, 0 end
+              S.dirDes = { tx, ty, tz }
               local alinhado = (S.errAng or 99) < 18
               S.pedido = (S.erroQueda > 2 * cfg.raioDetonacao and tgo > 2 and alinhado) and al or 0
-              local dx, dy, dz = normalizar(fx, fy, fz)
-              S.dirDes = { dx, dy, dz }
             else
               local dx, dy, dz, f = normalizar(fx, fy, fz)
               if f > 0 then S.dirDes, S.pedido = { dx, dy, dz }, f end
