@@ -4,7 +4,7 @@
 --      missil remoto   (aguarda ordens da base)
 --      missil teste    (teste de estabilizacao)
 
-local VERSAO = "4.9"
+local VERSAO = "4.9.1"
 local ARQ_CONFIG = "/bfm_config.txt"
 local PASTA_PRESETS = "bfm_presets"
 local PROTOCOLO = "bfm"
@@ -319,7 +319,7 @@ local PADRAO = {
   altDeton = 3, tempoMax = 180, impacto = true,
   -- RCS: motores solidos (Create Propulsion) no cone, para apontar o missil na
   -- QUEDA, quando os motores principais e os vector thrusters estao desligados.
-  usarRcs = true, kRcs = 0.8,
+  usarRcs = true, kRcs = 0.8, inverterRcs = false,
   rcsMotores = {}, -- nome do motor solido -> lado (N/S/L/O) que ele inclina o nariz
   -- sistema
   codigo = "", soCifrado = true, iniciarRemoto = false,
@@ -1637,17 +1637,24 @@ local function voar(opts)
         envio = { cx, cy, g }
       end
 
-      -- RCS do cone: na QUEDA os motores e os vetores estao desligados, entao
-      -- a atitude (apontar o nariz) vem dos motores solidos do cone. Comando na
-      -- mesma escala do bocal, no referencial Norte/Leste (sem o sinal do bocal).
-      if S.rcsAtit and modoPose and ang and #P.rcs > 0 then
-        local function pidNL(e, dr)
-          if cfg.kd > 0 then
-            return -(cfg.kd * (dr + clamp(cfg.kp / cfg.kd * e, -cfg.taxaVirar, cfg.taxaVirar)))
-          end
-          return -(cfg.kp * e)
-        end
-        S.rcsNivel = rcsAtitude(lim1(pidNL(ang[1], rnF)), lim1(pidNL(ang[2], rlF)))
+      -- RCS do cone: na QUEDA os motores e os vetores estao desligados, entao a
+      -- atitude (apontar o nariz) vem dos motores solidos do cone. O comando e no
+      -- referencial COMPASS (Norte = -Z, Leste = +X), o mesmo em que o RCS foi
+      -- calibrado -- direto da geometria, sem passar pelo referencial do bocal.
+      if S.rcsAtit and modoPose and q and S.dirCmd and S.nariz and #P.rcs > 0 then
+        -- direcao pedida e nariz atual, levados ao referencial do lancamento
+        local wx, _, wz = paraLancamento(q, S.q0, S.dirCmd[1], S.dirCmd[2], S.dirCmd[3])
+        local nx, _, nz = paraLancamento(q, S.q0, S.nariz[1], S.nariz[2], S.nariz[3])
+        -- inclinacao do nariz para o lado, em compass: quanto falta para alinhar
+        local eN, eL = nz - wz, wx - nx        -- N = -Z, L = +X
+        -- taxa da inclinacao do nariz (compass), filtrada, para amortecer
+        local tN, tL = ((-nz) - (S.rcsPn or -nz)) / dt, (nx - (S.rcsPl or nx)) / dt
+        S.rcsPn, S.rcsPl = -nz, nx
+        S.rcsFn = (S.rcsFn or 0) + 0.5 * (tN - (S.rcsFn or 0))
+        S.rcsFl = (S.rcsFl or 0) + 0.5 * (tL - (S.rcsFl or 0))
+        local inv = cfg.inverterRcs and -1 or 1
+        local function cmd(e, taxa) return lim1(cfg.kRcs * (6 * e - 0.4 * taxa)) end
+        S.rcsNivel = rcsAtitude(inv * cmd(eN, S.rcsFn), inv * cmd(eL, S.rcsFl))
       elseif not S.rcsAtit and S.rcsNivel then
         rcsDesligar()
         S.rcsNivel = nil
@@ -1857,10 +1864,12 @@ local function voar(opts)
             local al = math.max(aMin + ap, aMin, mo / math.tan(math.rad(cfg.inclAtaque)))
             fx, fy, fz = al * wx + ox, al * wy + oy, al * wz + oz
             if coast then
-              -- QUEDA: aponta o nariz para corrigir e so PULSA o motor quando o erro
-              -- previsto vale a pena e ainda ha tempo. Sem pulso, empuxo pedido = 0
-              -- (motores desligados); o RCS mantem o nariz apontado.
-              S.pedido = (S.erroQueda > cfg.raioDetonacao and tgo > 2) and al or 0
+              -- QUEDA: o RCS aponta o nariz; os motores/vetores ficam DESLIGADOS e
+              -- so dao um pulso curto quando (1) o erro previsto vale a pena, (2) ainda
+              -- ha tempo e (3) o nariz JA esta apontado para a correcao (senao o empuxo
+              -- iria para o lado errado). Deadband no erro para nao pulsar a toa.
+              local alinhado = (S.errAng or 99) < 18
+              S.pedido = (S.erroQueda > 2 * cfg.raioDetonacao and tgo > 2 and alinhado) and al or 0
               local dx, dy, dz = normalizar(fx, fy, fz)
               S.dirDes = { dx, dy, dz }
             else
@@ -2431,6 +2440,7 @@ local GRUPOS = {
   { "RCS (motores no cone)", {
     { "usarRcs", "Usar RCS na queda" },
     { "kRcs", "Forca do RCS (ganho)", 0, 3 },
+    { "inverterRcs", "Inverter RCS (se apontar errado)" },
   } },
   { "Ogiva e seguranca", {
     { "ladoOgiva", "Lado da ogiva (redstone)" },
@@ -2522,7 +2532,7 @@ local function ajustes()
     elseif confirmar("AJUSTES", "Restaurar todos os ajustes para o padrao?") then
       local manter = { "offX", "offZ", "eixoN", "sinalN", "eixoL", "sinalL", "gimbalOk",
         "eixoX", "sinalX", "eixoY", "sinalY", "bocalOk", "posMotores", "conjugarQuat", "qCal", "subId", "nome", "rcsMotores",
-        "iniciarRemoto" }
+        "inverterRcs", "iniciarRemoto" }
       local novo = copiar(PADRAO)
       for _, k in ipairs(manter) do novo[k] = cfg[k] end
       cfg = novo

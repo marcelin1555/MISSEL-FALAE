@@ -271,3 +271,20 @@ liga direto com setPowerNormalized -- sem warhead, sem redstone.
   blocos no caso realista; sem RCS nem pulsos o erro sobe para 8-150.
 Substitui o mecanismo de RCS por Guidance Warhead da v4.7/v4.8.
 Base v3.0 e torres de GPS: iguais a v4.8.
+
+v4.9.1-hotfix-rcs
+-----------------
+Correcao dos dois bugs vistos no primeiro voo da v4.9 (computador 15):
+- RCS ligava os motores ERRADOS para mirar: o comando era feito no referencial
+  do bocal (girado 90 graus) em vez do compass N/L em que o RCS e calibrado. Na
+  QUEDA o erro de apontamento crescia ate ~120 graus e abortava. Agora o comando
+  do RCS vem direto da geometria (direcao pedida x nariz, no referencial do
+  lancamento, N = -Z / L = +X), com amortecimento pela taxa de inclinacao do nariz.
+- Novo ajuste "Inverter RCS": se no jogo o RCS ainda apontar para o lado errado,
+  basta ligar (nao precisa mexer no codigo).
+- Vetores ligavam SEMPRE na queda: o pulso de correcao disparava a qualquer erro,
+  entao nunca havia coast de verdade. Agora o motor/vetor so pulsa quando o erro
+  previsto passa de 2x o raio de detonacao, ainda ha tempo E o nariz ja esta
+  apontado (erro < 18 graus). Fora disso, tudo desligado (queda balistica) e so
+  o RCS aponta o nariz.
+Base v3.0 e torres de GPS: iguais a v4.9.
